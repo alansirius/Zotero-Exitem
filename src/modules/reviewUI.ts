@@ -6,21 +6,34 @@ import {
   openReviewManagerWindow,
 } from "./reviewManager";
 import {
+  assignReviewRecordsFolder,
   createReviewFolder,
   ensureDefaultReviewFolder,
-  getReviewRecordByItemID,
   initReviewStore,
   listReviewFolders,
   trackReviewEvent,
   upsertReviewRecord,
 } from "./reviewStore";
-import { LiteratureReviewDraft, ReviewFolderRow } from "./reviewTypes";
+import { ReviewFolderRow } from "./reviewTypes";
 
 const reviewContextMenuID = `${config.addonRef}-itemmenu-ai-extract-review`;
+const reviewToolbarButtonID = `${config.addonRef}-review-manager-button`;
+const reviewStylesheetID = `${config.addonRef}-review-manager-style`;
+const singleExtractionDefaultFolderName = "我的记录";
+const repairRetryDelays = [250, 1000, 3000, 6000];
 const boundItemMenuPopups = new WeakSet<EventTarget>();
+const boundContextMenuRepairWindows = new WeakSet<Window>();
+const boundToolbarRepairWindows = new WeakSet<Window>();
 
 export async function initializeReviewFeature() {
-  await initReviewStore();
+  try {
+    await initReviewStore();
+  } catch (e) {
+    ztoolkit.log(
+      "Review store init failed; continue registering UI for compatibility",
+      e,
+    );
+  }
   registerReviewContextMenu();
 }
 
@@ -28,38 +41,56 @@ export function registerReviewContextMenu(
   win?: _ZoteroTypes.MainWindow | Window,
 ) {
   if (win) {
-    ensureReviewContextMenuInWindow(win);
+    bindReviewContextMenuRepair(win as Window);
+    ensureReviewContextMenuInWindow(win as Window);
     return;
   }
 
-  const wins = (Zotero.getMainWindows?.() ||
-    []) as Array<_ZoteroTypes.MainWindow>;
+  const wins = getMainWindowsCompat();
   let insertedAny = false;
   for (const mainWin of wins) {
-    insertedAny = ensureReviewContextMenuInWindow(mainWin) || insertedAny;
+    const windowObj = mainWin as unknown as Window;
+    bindReviewContextMenuRepair(windowObj);
+    insertedAny = ensureReviewContextMenuInWindow(windowObj) || insertedAny;
   }
 
   if (insertedAny) return;
 
-  const registered = ztoolkit.Menu.register(
-    "item",
-    buildReviewContextMenuOptions(),
-  );
-  if (registered === false) {
-    ztoolkit.log(
-      "Review context menu registration skipped: item popup not found",
+  try {
+    const globalDoc = ztoolkit.getGlobal("document");
+    if (!globalDoc?.querySelector) {
+      ztoolkit.log(
+        "Review context menu registration deferred: main window document unavailable",
+      );
+      return;
+    }
+    const registered = ztoolkit.Menu.register(
+      "item",
+      buildReviewContextMenuOptions(),
     );
+    if (registered === false) {
+      ztoolkit.log(
+        "Review context menu registration skipped: item popup not found",
+      );
+    }
+  } catch (e) {
+    ztoolkit.log("Review context menu registration failed", e);
   }
 }
 
 export function registerReviewToolbarButton(win: _ZoteroTypes.MainWindow) {
+  registerReviewStylesheet(win as unknown as Window);
+  bindReviewToolbarRepair(win as unknown as Window);
+
   const doc = win.document;
-  const id = `${config.addonRef}-review-manager-button`;
+  const id = reviewToolbarButtonID;
   if (doc.getElementById(id)) return;
 
   const target = findToolbarContainer(doc);
   if (!target) {
-    ztoolkit.log("Review toolbar container not found; skipping toolbar button");
+    ztoolkit.log(
+      "Review toolbar container not found yet; toolbar button will retry",
+    );
     return;
   }
 
@@ -75,7 +106,11 @@ export function registerReviewToolbarButton(win: _ZoteroTypes.MainWindow) {
       `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`,
     );
     button.setAttribute("tooltiptext", "打开文献综述管理");
-    button.setAttribute("class", "zotero-tb-button");
+    button.setAttribute("class", "toolbarbutton-1 zotero-tb-button");
+    button.setAttribute(
+      "style",
+      `list-style-image: url(chrome://${config.addonRef}/content/icons/favicon@0.5x.png);`,
+    );
     button.addEventListener("command", () => {
       void openReviewManagerWindow(win);
     });
@@ -110,11 +145,28 @@ export function registerReviewToolbarButton(win: _ZoteroTypes.MainWindow) {
   target.appendChild(button);
 }
 
+export function registerReviewStylesheet(win: Window) {
+  const doc = win.document;
+  if (!doc || doc.getElementById(reviewStylesheetID)) return;
+  const link = doc.createElementNS(
+    "http://www.w3.org/1999/xhtml",
+    "link",
+  ) as HTMLLinkElement;
+  link.id = reviewStylesheetID;
+  link.rel = "stylesheet";
+  link.type = "text/css";
+  link.href = `chrome://${config.addonRef}/content/zoteroPane.css`;
+  doc.documentElement?.appendChild(link);
+}
+
 export function unregisterReviewToolbarButton(win: Window) {
   try {
-    win.document
-      ?.getElementById(`${config.addonRef}-review-manager-button`)
-      ?.remove();
+    win.document?.getElementById(reviewToolbarButtonID)?.remove();
+  } catch {
+    // ignore
+  }
+  try {
+    win.document?.getElementById(reviewStylesheetID)?.remove();
   } catch {
     // ignore
   }
@@ -163,6 +215,7 @@ export async function handleExtractFromSelection() {
   if (items.length === 1) {
     const item = items[0];
     try {
+      const targetFolder = await ensureSingleExtractionFolder();
       progress.changeLine({
         text: `正在提炼: ${truncate(item.getDisplayTitle(), 40)}`,
         progress: 0,
@@ -170,17 +223,24 @@ export async function handleExtractFromSelection() {
       const onProgress = createSingleExtractionProgressUpdater(progress, item);
       const draft = await extractLiteratureReview(item, { onProgress });
       progress.changeLine({
-        text: "提炼完成，正在打开结果编辑窗口...",
+        text: "提炼完成，正在保存结果...",
         progress: 98,
       });
+      const savedRow = await upsertReviewRecord(draft, {
+        folderID: targetFolder.id,
+      });
+      await assignReviewRecordsFolder([savedRow.id], null);
       await trackReviewEvent("ai_extraction_success", {
         timestamp: new Date().toISOString(),
         article_id: item.id,
         model_type: `${draft.aiProvider}:${draft.aiModel}`,
       }).catch((e) => ztoolkit.log(e));
-      progress.changeLine({ text: "提炼成功", type: "success", progress: 100 });
-      progress.startCloseTimer(1500);
-      await openReviewResultDialog(draft);
+      progress.changeLine({
+        text: "提炼成功",
+        type: "success",
+        progress: 100,
+      });
+      progress.startCloseTimer(2000);
     } catch (e) {
       const message = getReviewErrorMessage(e);
       await trackReviewEvent("ai_extraction_fail", {
@@ -280,342 +340,21 @@ export async function handleExtractFromSelection() {
   }
 }
 
-async function openReviewResultDialog(draft: LiteratureReviewDraft) {
+async function ensureSingleExtractionFolder() {
   await initReviewStore();
   const folders = await listReviewFolders().catch(
     () => [] as ReviewFolderRow[],
   );
-  const existingRecord = await getReviewRecordByItemID(
-    draft.zoteroItemID,
-  ).catch(() => null);
-  const defaultFolderID =
-    existingRecord?.folderID ??
-    folders.find((folder) => folder.name === "未分类")?.id ??
-    folders[0]?.id ??
-    null;
-
-  const dialogData: Record<string, any> = {
-    title: draft.title,
-    authors: draft.authors,
-    journal: draft.journal,
-    publicationDate: draft.publicationDate,
-    abstractText: draft.abstractText,
-    researchBackground: draft.researchBackground,
-    literatureReview: draft.literatureReview,
-    researchMethods: draft.researchMethods,
-    researchConclusions: draft.researchConclusions,
-    keyFindingsText: draft.keyFindings.join("\n"),
-    classificationTagsText: draft.classificationTags.join(", "),
-    folderID: defaultFolderID == null ? "" : String(defaultFolderID),
-    loadCallback: () => {
-      try {
-        const win = helper.window as Window | undefined;
-        win?.document?.documentElement?.setAttribute("width", "880");
-      } catch {
-        // ignore
-      }
-    },
-    unloadCallback: () => {
-      if (addon?.data?.dialogs) {
-        delete addon.data.dialogs.reviewResult;
-      }
-    },
-  };
-
-  let row = 0;
-  const dialog = new ztoolkit.Dialog(40, 2)
-    .addCell(row++, 0, {
-      tag: "h2",
-      properties: { innerHTML: "提炼结果" },
-      styles: { margin: "0", fontSize: "16px" },
-    })
-    .addCell(
-      row - 1,
-      1,
-      {
-        tag: "button",
-        namespace: "html",
-        attributes: { type: "button" },
-        listeners: [
-          {
-            type: "click",
-            listener: () => focusZoteroItem(draft.zoteroItemID),
-          },
-        ],
-        children: [
-          {
-            tag: "span",
-            properties: { innerHTML: "定位原条目" },
-          },
-        ],
-      },
-      false,
-    );
-
-  row = addInputRow(dialog, row, "标题", "title", "text", true);
-  row = addInputRow(dialog, row, "作者", "authors");
-  row = addInputRow(dialog, row, "期刊", "journal");
-  row = addInputRow(dialog, row, "发布时间", "publicationDate");
-  row = addTextareaRow(dialog, row, "摘要", "abstractText", 4);
-  row = addTextareaRow(dialog, row, "研究背景", "researchBackground", 4);
-  row = addTextareaRow(dialog, row, "文献综述", "literatureReview", 5);
-  row = addTextareaRow(dialog, row, "研究方法", "researchMethods", 4);
-  row = addTextareaRow(dialog, row, "研究结论", "researchConclusions", 4);
-  row = addTextareaRow(
-    dialog,
-    row,
-    "关键发现（每行一条）",
-    "keyFindingsText",
-    5,
+  const existing = folders.find(
+    (folder) => folder.name === singleExtractionDefaultFolderName,
   );
-  row = addTextareaRow(
-    dialog,
-    row,
-    "分类标签（逗号或换行分隔）",
-    "classificationTagsText",
-    3,
-  );
-  row = addSelectRow(
-    dialog,
-    row,
-    "保存到文件夹",
-    "folderID",
-    folders.map((folder) => ({
-      value: String(folder.id),
-      label: folder.name,
-    })),
-  );
-
-  const helper = dialog
-    .addButton("新建文件夹", "new-folder", {
-      noClose: true,
-      callback: () => {
-        void createFolderFromReviewDialog(helper, dialogData);
-      },
-    })
-    .addButton("保存", "save")
-    .addButton("文献综述页", "open-manager", {
-      noClose: true,
-      callback: () => {
-        void openReviewManagerWindow();
-      },
-    })
-    .addButton("取消", "cancel")
-    .setDialogData(dialogData)
-    .open(`提炼结果 - ${truncate(draft.title, 24)}`);
-
-  addon.data.dialogs = addon.data.dialogs || {};
-  addon.data.dialogs.reviewResult = helper;
-
-  if (!dialogData.unloadLock?.promise) {
-    return;
-  }
-
-  await dialogData.unloadLock.promise;
-  if (dialogData._lastButtonId !== "save") {
-    return;
-  }
-
-  const savedDraft: LiteratureReviewDraft = {
-    ...draft,
-    title: String(dialogData.title || "").trim(),
-    authors: String(dialogData.authors || "").trim(),
-    journal: String(dialogData.journal || "").trim(),
-    publicationDate: String(dialogData.publicationDate || "").trim(),
-    abstractText: String(dialogData.abstractText || "").trim(),
-    researchBackground: String(dialogData.researchBackground || "").trim(),
-    literatureReview: String(dialogData.literatureReview || "").trim(),
-    researchMethods: String(dialogData.researchMethods || "").trim(),
-    researchConclusions: String(dialogData.researchConclusions || "").trim(),
-    keyFindings: splitLinesOrComma(dialogData.keyFindingsText),
-    classificationTags: splitLinesOrComma(dialogData.classificationTagsText),
-  };
-  const selectedFolderID = parseOptionalPositiveInt(dialogData.folderID);
-  const savedRow = await upsertReviewRecord(savedDraft, {
-    folderID: selectedFolderID,
-  });
-  rememberLastSaveFolderID(selectedFolderID ?? savedRow.folderID);
-  const folderLabel = selectedFolderID
-    ? folders.find((folder) => folder.id === selectedFolderID)?.name ||
-      savedRow.folderName
-    : savedRow.folderNames?.join("、") || savedRow.folderName;
-  showToast(`已保存到文献综述页（${folderLabel || "未分类"}）`, "success");
-}
-
-function addInputRow(
-  dialog: any,
-  row: number,
-  label: string,
-  bindKey: string,
-  type = "text",
-  strong = false,
-) {
-  dialog.addCell(row, 0, {
-    tag: "label",
-    namespace: "html",
-    properties: { innerHTML: label },
-    styles: {
-      fontWeight: strong ? "600" : "400",
-      paddingTop: "6px",
-      fontSize: "12px",
-    },
-  });
-  dialog.addCell(
-    row,
-    1,
-    {
-      tag: "input",
-      namespace: "html",
-      attributes: {
-        type,
-        "data-bind": bindKey,
-        "data-prop": "value",
-      },
-      styles: {
-        width: "100%",
-        boxSizing: "border-box",
-        fontSize: "12px",
-        padding: "4px 6px",
-      },
-    },
-    false,
-  );
-  return row + 1;
-}
-
-function addTextareaRow(
-  dialog: any,
-  row: number,
-  label: string,
-  bindKey: string,
-  rows = 4,
-) {
-  dialog.addCell(row, 0, {
-    tag: "label",
-    namespace: "html",
-    properties: { innerHTML: label },
-    styles: {
-      paddingTop: "6px",
-      fontSize: "12px",
-      verticalAlign: "top",
-    },
-  });
-  dialog.addCell(
-    row,
-    1,
-    {
-      tag: "textarea",
-      namespace: "html",
-      attributes: {
-        rows: String(rows),
-        "data-bind": bindKey,
-        "data-prop": "value",
-      },
-      styles: {
-        width: "100%",
-        boxSizing: "border-box",
-        resize: "vertical",
-        fontSize: "12px",
-        lineHeight: "1.4",
-        padding: "6px",
-      },
-    },
-    false,
-  );
-  return row + 1;
-}
-
-function addSelectRow(
-  dialog: any,
-  row: number,
-  label: string,
-  bindKey: string,
-  options: Array<{ value: string; label: string }>,
-) {
-  dialog.addCell(row, 0, {
-    tag: "label",
-    namespace: "html",
-    properties: { innerHTML: label },
-    styles: {
-      paddingTop: "6px",
-      fontSize: "12px",
-    },
-  });
-  dialog.addCell(
-    row,
-    1,
-    {
-      tag: "select",
-      namespace: "html",
-      attributes: {
-        "data-bind": bindKey,
-        "data-prop": "value",
-      },
-      children: options.map((opt) => ({
-        tag: "option",
-        namespace: "html",
-        attributes: { value: opt.value },
-        properties: { innerHTML: opt.label },
-      })),
-      styles: {
-        width: "100%",
-        boxSizing: "border-box",
-        fontSize: "12px",
-        padding: "4px 6px",
-      },
-    },
-    false,
-  );
-  return row + 1;
-}
-
-async function createFolderFromReviewDialog(
-  helper: any,
-  dialogData: Record<string, any>,
-) {
-  const win = helper?.window as Window | undefined;
-  if (!win) return;
-
-  const name = win.prompt("请输入新文件夹名称", "");
-  if (!name) return;
-
-  try {
-    const folder = await createReviewFolder(name);
-    const folders = await listReviewFolders();
-    dialogData.folderID = String(folder.id);
-    syncDialogFolderSelectOptions(win.document, folders, String(folder.id));
-    showToast(`已选择文件夹：${folder.name}`, "success");
-  } catch (e: any) {
-    win.alert(`创建文件夹失败：${e?.message || e}`);
-  }
-}
-
-function syncDialogFolderSelectOptions(
-  doc: Document,
-  folders: ReviewFolderRow[],
-  selectedValue: string,
-) {
-  const select = doc.querySelector(
-    'select[data-bind="folderID"]',
-  ) as HTMLSelectElement | null;
-  if (!select) return;
-
-  select.innerHTML = "";
-  for (const folder of folders) {
-    const opt = doc.createElement("option");
-    opt.value = String(folder.id);
-    opt.textContent = folder.name;
-    if (opt.value === selectedValue) {
-      opt.selected = true;
-    }
-    select.appendChild(opt);
-  }
-  select.value = selectedValue;
+  if (existing) return existing;
+  return createReviewFolder(singleExtractionDefaultFolderName);
 }
 
 function getSelectedRegularItems() {
   const pane = (ztoolkit.getGlobal("ZoteroPane") ||
-    (Zotero.getMainWindows?.()[0] as any)?.ZoteroPane) as any;
+    (getPrimaryMainWindowCompat() as any)?.ZoteroPane) as any;
   const items = (pane?.getSelectedItems?.() || []) as Zotero.Item[];
   return items.filter((item) => {
     try {
@@ -629,8 +368,10 @@ function getSelectedRegularItems() {
 function findToolbarContainer(doc: Document) {
   const ids = [
     "zotero-toolbar",
+    "zotero-tb-toolbar",
     "zotero-items-toolbar",
     "zotero-collections-toolbar",
+    "zotero-pane-toolbar",
     "zotero-tb-sync",
   ];
 
@@ -643,38 +384,13 @@ function findToolbarContainer(doc: Document) {
     return el;
   }
 
-  return doc.querySelector("toolbar") || doc.querySelector("header") || null;
-}
-
-function focusZoteroItem(itemID: number) {
-  const wins = Zotero.getMainWindows?.() || [];
-  const win = wins[0] as any;
-  if (!win) {
-    showAlert("未找到 Zotero 主窗口，无法定位条目");
-    return;
-  }
-  try {
-    win.focus();
-    if (win.ZoteroPane?.selectItem) {
-      void win.ZoteroPane.selectItem(itemID);
-    }
-  } catch (e) {
-    ztoolkit.log("focus item failed", e);
-  }
-}
-
-function splitLinesOrComma(value: unknown) {
-  return String(value || "")
-    .split(/[\n,，;；]/)
-    .map((v) => v.trim())
-    .filter(Boolean);
-}
-
-function parseOptionalPositiveInt(value: unknown) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  const int = Math.floor(n);
-  return int > 0 ? int : null;
+  return (
+    doc.querySelector(
+      "#zotero-pane toolbar, #zotero-pane [id*='toolbar'], toolbar",
+    ) ||
+    doc.querySelector("header") ||
+    null
+  );
 }
 
 async function resolveBatchSaveFolder() {
@@ -742,7 +458,7 @@ function showAlert(text: string) {
     return;
   }
   try {
-    (Zotero.getMainWindows?.()[0] as any)?.alert(text);
+    (getPrimaryMainWindowCompat() as any)?.alert(text);
   } catch {
     ztoolkit.log(text);
   }
@@ -767,10 +483,17 @@ function buildReviewContextMenuOptions() {
 
 function ensureReviewContextMenuInWindow(win: Window) {
   try {
-    const popup = win.document?.querySelector?.(
-      "#zotero-itemmenu",
-    ) as XUL.MenuPopup | null;
+    const popup = findReviewContextMenuPopup(win.document);
     if (!popup) return false;
+    return ensureReviewContextMenuInPopup(popup);
+  } catch (e) {
+    ztoolkit.log("ensure review context menu failed", e);
+    return false;
+  }
+}
+
+function ensureReviewContextMenuInPopup(popup: XUL.MenuPopup) {
+  try {
     bindReviewItemMenuPopup(popup);
     if (popup.querySelector(`#${reviewContextMenuID}`)) {
       return true;
@@ -781,7 +504,7 @@ function ensureReviewContextMenuInWindow(win: Window) {
     );
     return registered !== false;
   } catch (e) {
-    ztoolkit.log("ensure review context menu failed", e);
+    ztoolkit.log("ensure review context menu in popup failed", e);
     return false;
   }
 }
@@ -800,6 +523,136 @@ function bindReviewItemMenuPopup(popup: XUL.MenuPopup) {
   };
   popup.addEventListener("popupshowing", onPopupShowing);
   boundItemMenuPopups.add(popup);
+}
+
+function findReviewContextMenuPopup(doc: Document) {
+  const direct = doc.getElementById("zotero-itemmenu") as XUL.MenuPopup | null;
+  if (direct) return direct;
+
+  const popups = doc.querySelectorAll("menupopup");
+  for (const popup of popups) {
+    if (isLikelyItemMenuPopup(popup)) {
+      return popup as XUL.MenuPopup;
+    }
+  }
+  return null;
+}
+
+function isLikelyItemMenuPopup(el: Element) {
+  if (!el || el.tagName?.toLowerCase() !== "menupopup") return false;
+  const id = String((el as HTMLElement).id || "").toLowerCase();
+  if (id === "zotero-itemmenu") return true;
+  return id.includes("itemmenu");
+}
+
+function bindReviewContextMenuRepair(win: Window) {
+  if (boundContextMenuRepairWindows.has(win)) return;
+  boundContextMenuRepairWindows.add(win);
+
+  try {
+    win.document?.addEventListener(
+      "popupshowing",
+      (event: Event) => {
+        const popup = event.target as Element | null;
+        if (!popup || !isLikelyItemMenuPopup(popup)) return;
+        void ensureReviewContextMenuInPopup(popup as unknown as XUL.MenuPopup);
+      },
+      true,
+    );
+  } catch (e) {
+    ztoolkit.log("bind review context menu repair failed", e);
+  }
+
+  for (const delay of repairRetryDelays) {
+    scheduleWindowTask(win, delay, () => {
+      void ensureReviewContextMenuInWindow(win);
+    });
+  }
+}
+
+function bindReviewToolbarRepair(win: Window) {
+  if (boundToolbarRepairWindows.has(win)) return;
+  boundToolbarRepairWindows.add(win);
+
+  for (const delay of repairRetryDelays) {
+    scheduleWindowTask(win, delay, () => {
+      const doc = win.document;
+      if (!doc || doc.getElementById(reviewToolbarButtonID)) return;
+      registerReviewToolbarButton(win as unknown as _ZoteroTypes.MainWindow);
+    });
+  }
+
+  try {
+    const doc = win.document;
+    const root = doc?.documentElement;
+    const observerClass = (win as any).MutationObserver;
+    if (!root || typeof observerClass !== "function") return;
+    let queued = false;
+    const observer = new observerClass(() => {
+      if (queued) return;
+      queued = true;
+      scheduleWindowTask(win, 60, () => {
+        queued = false;
+        if (!doc.getElementById(reviewToolbarButtonID)) {
+          registerReviewToolbarButton(
+            win as unknown as _ZoteroTypes.MainWindow,
+          );
+        }
+      });
+    });
+    observer.observe(root, { childList: true, subtree: true });
+  } catch (e) {
+    ztoolkit.log("bind review toolbar repair failed", e);
+  }
+}
+
+function scheduleWindowTask(win: Window, delayMS: number, task: () => void) {
+  try {
+    win.setTimeout(() => {
+      if ((win as any).closed) return;
+      task();
+    }, delayMS);
+  } catch {
+    // ignore
+  }
+}
+
+function getMainWindowsCompat() {
+  const getMainWindows = (Zotero as any)?.getMainWindows;
+  if (typeof getMainWindows === "function") {
+    const wins = getMainWindows.call(Zotero);
+    if (Array.isArray(wins)) return wins as _ZoteroTypes.MainWindow[];
+  }
+  const getMainWindow = (Zotero as any)?.getMainWindow;
+  if (typeof getMainWindow === "function") {
+    const win = getMainWindow.call(Zotero);
+    return win ? ([win] as _ZoteroTypes.MainWindow[]) : [];
+  }
+
+  try {
+    const wm = (globalThis as any)?.Services?.wm;
+    if (wm?.getEnumerator) {
+      const wins: _ZoteroTypes.MainWindow[] = [];
+      for (const type of ["zotero:main", "navigator:browser"]) {
+        const enumerator = wm.getEnumerator(type);
+        while (enumerator?.hasMoreElements?.()) {
+          const win = enumerator.getNext();
+          if ((win as any)?.document) {
+            wins.push(win as _ZoteroTypes.MainWindow);
+          }
+        }
+        if (wins.length) return wins;
+      }
+    }
+  } catch (e) {
+    ztoolkit.log("getMainWindowsCompat fallback failed", e);
+  }
+
+  return [] as _ZoteroTypes.MainWindow[];
+}
+
+function getPrimaryMainWindowCompat() {
+  return getMainWindowsCompat()[0] || null;
 }
 
 function createSingleExtractionProgressUpdater(

@@ -1,14 +1,10 @@
 import { config } from "../../package.json";
-import {
-  getReviewErrorMessage,
-  parseReviewPromptFieldKeys,
-  synthesizeFolderReview,
-} from "./reviewAI";
+import { createNativeNoteForReviewRecord } from "./reviewNote";
+import { getReviewErrorMessage, synthesizeFolderReview } from "./reviewAI";
 import type {
   ReviewExtractionProgress,
   ReviewPromptFieldKey,
 } from "./reviewAI";
-import { getReviewSettings } from "./reviewConfig";
 import {
   assignReviewRecordsFolder,
   countReviewRecords,
@@ -21,16 +17,20 @@ import {
   listReviewFolders,
   listReviewRecords,
   mergeReviewFolders,
+  renameReviewFolder,
   removeReviewRecordsFromFolder,
   trackReviewEvent,
+  updateLiteratureReviewRecord,
   updateReviewRecordRawResponse,
 } from "./reviewStore";
 import { ReviewFolderRow, ReviewRecordRow } from "./reviewTypes";
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
+const XUL_NS = "http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul";
 const REVIEW_MANAGER_ROOT_ID = `${config.addonRef}-review-manager-root`;
-const REVIEW_TAB_TYPE = `${config.addonRef}-review-manager-tab`;
-const MANAGER_PAGE_SIZE = 100;
+const REVIEW_TAB_TITLE = "文献综述管理";
+const REVIEW_TAB_PAGE_URL = `chrome://${config.addonRef}/content/reviewManager.xhtml`;
+export const REVIEW_TAB_ICON_KEY = `${config.addonRef}-review-manager-tab`;
 const REVIEW_DIALOG_DEFAULT_WIDTH = 1200;
 const REVIEW_DIALOG_DEFAULT_HEIGHT = 860;
 const DEFAULT_TABLE_MIN_WIDTH = 960;
@@ -40,21 +40,32 @@ const TABLE_TRUNCATE_MIN_FACTOR = 1.05;
 const TABLE_TRUNCATE_MAX_FACTOR = 3.6;
 const TABLE_TRUNCATE_MIN_SENTENCE_LENGTH = 26;
 const TABLE_TRUNCATE_BOUNDARY_WINDOW = 28;
+const FIXED_LITERATURE_TABLE_FIELDS: ReviewPromptFieldKey[] = [
+  "title",
+  "authors",
+  "journal",
+  "publicationDate",
+  "abstract",
+  "researchBackground",
+  "literatureReview",
+  "researchMethods",
+  "researchConclusions",
+  "keyFindings",
+  "classificationTags",
+];
 
 interface ManagerState {
   viewMode: ReviewRecordRow["recordType"];
-  literaturePromptFieldKeys: ReviewPromptFieldKey[];
   search: string;
   sortKey: "updatedAt" | "title" | "publicationDate" | "journal";
   sortDir: "asc" | "desc";
-  page: number;
-  pageSize: number;
   totalRows: number;
   folderFilterID: number | null;
   moveTargetFolderID: number | null;
   selectedFolderIDs: Set<number>;
   selectedRecordIDs: Set<number>;
   selectionAnchorRecordID: number | null;
+  pendingFocusFolderKey: string | null;
   folders: ReviewFolderRow[];
   rows: ReviewRecordRow[];
 }
@@ -69,14 +80,24 @@ interface ManagerRefs {
   sortKeyBtn: HTMLButtonElement;
   sortDirBtn: HTMLButtonElement;
   filterStatusText: HTMLSpanElement;
-  pagePrevBtn: HTMLButtonElement;
-  pageNextBtn: HTMLButtonElement;
-  pageInfoText: HTMLSpanElement;
   table: HTMLTableElement;
   tableHeadRow: HTMLTableRowElement;
   tableBody: HTMLTableSectionElement;
   preview: HTMLTextAreaElement;
   selectionText: HTMLSpanElement;
+  btnCreateFolder: HTMLButtonElement;
+  btnRenameFolder: HTMLButtonElement;
+  btnDeleteFolder: HTMLButtonElement;
+  btnMergeFolder: HTMLButtonElement;
+  btnFolderSummary: HTMLButtonElement;
+  btnMoveSelected: HTMLButtonElement;
+  btnRemoveSelected: HTMLButtonElement;
+  btnDeleteSelected: HTMLButtonElement;
+  btnSelectAll: HTMLButtonElement;
+  btnClearSelection: HTMLButtonElement;
+  btnPreviewRaw: HTMLButtonElement;
+  btnCreateNote: HTMLButtonElement;
+  btnExport: HTMLButtonElement;
 }
 
 interface ManagerContext {
@@ -100,13 +121,25 @@ interface TableColumnSpec {
 }
 
 let managerContext: ManagerContext | null = null;
+let managerOpenPromise: Promise<void> | null = null;
 
 export async function openReviewManagerWindow(preferredWin?: Window) {
-  if (managerContext && isManagerContextAlive(managerContext)) {
-    focusManagerContext(managerContext);
-    await refreshManagerData(managerContext);
-    renderManager(managerContext);
-    return;
+  if (managerContext) {
+    if (managerOpenPromise) {
+      await managerOpenPromise.catch(() => undefined);
+      if (managerContext && isManagerContextAlive(managerContext)) {
+        focusManagerContext(managerContext);
+        await refreshManagerData(managerContext);
+        renderManager(managerContext);
+      }
+      return;
+    }
+    if (isManagerContextAlive(managerContext)) {
+      focusManagerContext(managerContext);
+      await refreshManagerData(managerContext);
+      renderManager(managerContext);
+      return;
+    }
   }
 
   const ctx: ManagerContext = {
@@ -114,28 +147,39 @@ export async function openReviewManagerWindow(preferredWin?: Window) {
     helper: null,
     state: {
       viewMode: "literature",
-      literaturePromptFieldKeys: [],
       search: "",
       sortKey: "updatedAt",
       sortDir: "desc",
-      page: 1,
-      pageSize: MANAGER_PAGE_SIZE,
       totalRows: 0,
       folderFilterID: null,
       moveTargetFolderID: null,
       selectedFolderIDs: new Set<number>(),
       selectedRecordIDs: new Set<number>(),
       selectionAnchorRecordID: null,
+      pendingFocusFolderKey: null,
       folders: [],
       rows: [],
     },
   };
   managerContext = ctx;
+  const openTask = (async () => {
+    const win = getTargetMainWindow(preferredWin);
+    const openedInTab = win ? await openReviewManagerInTab(ctx, win) : false;
+    if (!openedInTab) {
+      await openReviewManagerInDialog(ctx);
+    }
+  })();
+  managerOpenPromise = openTask;
 
-  const win = getTargetMainWindow(preferredWin);
-  const openedInTab = win ? await openReviewManagerInTab(ctx, win) : false;
-  if (!openedInTab) {
-    openReviewManagerInDialog(ctx);
+  try {
+    await openTask;
+  } finally {
+    if (managerOpenPromise === openTask) {
+      managerOpenPromise = null;
+    }
+  }
+  if (managerContext !== ctx || !isManagerContextAlive(ctx)) {
+    return;
   }
 
   void trackReviewEvent("table_view_click", {
@@ -147,13 +191,6 @@ export async function openReviewManagerWindow(preferredWin?: Window) {
   }).catch((e) => ztoolkit.log(e));
 }
 
-export async function refreshReviewManagerIfOpen() {
-  const ctx = managerContext;
-  if (!ctx || !isManagerContextAlive(ctx)) return false;
-  await refreshAndRender(ctx);
-  return true;
-}
-
 export function closeReviewManagerWindow() {
   const ctx = managerContext;
   managerContext = null;
@@ -161,7 +198,7 @@ export function closeReviewManagerWindow() {
 
   try {
     if (ctx.mode === "tab" && ctx.tabID) {
-      const tabs = getTabsAPI(ctx.helper?.window);
+      const tabs = getTabsAPI(getManagerMainWindow(ctx));
       tabs?.close(ctx.tabID);
       return;
     }
@@ -173,12 +210,21 @@ export function closeReviewManagerWindow() {
 
 function isManagerContextAlive(ctx: ManagerContext) {
   if (ctx.mode === "tab") {
+    const frame = ctx.helper?.frame as
+      | (XULElement & { isConnected?: boolean; contentWindow?: Window | null })
+      | undefined;
+    if (frame) {
+      return Boolean(frame.isConnected && frame.contentWindow);
+    }
     if (!ctx.tabID) return false;
-    const tabs = getTabsAPI(ctx.helper?.window);
+    const tabs = getTabsAPI(getManagerMainWindow(ctx));
     if (!tabs) return false;
     try {
-      tabs._getTab(ctx.tabID);
-      return true;
+      if (typeof tabs._getTab === "function") {
+        tabs._getTab(ctx.tabID);
+        return true;
+      }
+      return Boolean(ctx.helper?.window && !ctx.helper.window.closed);
     } catch {
       return false;
     }
@@ -188,7 +234,7 @@ function isManagerContextAlive(ctx: ManagerContext) {
 
 function focusManagerContext(ctx: ManagerContext) {
   if (ctx.mode === "tab" && ctx.tabID) {
-    const win = ctx.helper?.window as any;
+    const win = getManagerMainWindow(ctx) as any;
     try {
       win?.focus?.();
       win?.Zotero_Tabs?.select?.(ctx.tabID);
@@ -206,14 +252,22 @@ function focusManagerContext(ctx: ManagerContext) {
 
 function getTargetMainWindow(preferredWin?: Window) {
   const preferred = preferredWin as any;
-  if (preferred?.document && preferred?.Zotero_Tabs) {
+  if (preferred?.document) {
     return preferred as Window;
   }
-  return (Zotero.getMainWindows?.()[0] as unknown as Window) || null;
+  return (getMainWindowsCompat()[0] as unknown as Window) || null;
 }
 
 function getTabsAPI(win: any) {
-  return (win as any)?.Zotero_Tabs || (globalThis as any)?.Zotero_Tabs || null;
+  return (win as any)?.Zotero_Tabs || null;
+}
+
+function getManagerMainWindow(ctx: ManagerContext) {
+  return (
+    (ctx.helper?.mainWindow as Window | null) ||
+    (ctx.helper?.window as Window | null) ||
+    null
+  );
 }
 
 async function openReviewManagerInTab(ctx: ManagerContext, win: Window) {
@@ -222,10 +276,14 @@ async function openReviewManagerInTab(ctx: ManagerContext, win: Window) {
     return false;
   }
 
+  let openedTabID: string | null = null;
   try {
     const { id, container } = tabs.add({
-      type: REVIEW_TAB_TYPE,
-      title: "文献综述",
+      type: "library",
+      title: REVIEW_TAB_TITLE,
+      data: {
+        icon: REVIEW_TAB_ICON_KEY,
+      },
       select: true,
       onClose: () => {
         if (managerContext === ctx) {
@@ -233,22 +291,35 @@ async function openReviewManagerInTab(ctx: ManagerContext, win: Window) {
         }
       },
     });
+    if (!container) {
+      throw new Error("review manager tab container unavailable");
+    }
 
     ctx.mode = "tab";
     ctx.tabID = id;
-    ctx.helper = { window: win };
-
-    prepareTabContainer(win.document, container as unknown as Element);
-    mountManagerUI(ctx);
+    openedTabID = id;
+    ctx.helper = { mainWindow: win, window: win };
+    await prepareTabContainer(ctx, win.document, container as Element);
     await refreshAndRender(ctx);
     return true;
   } catch (e) {
+    if (openedTabID) {
+      try {
+        tabs?.close?.(openedTabID);
+      } catch {
+        // ignore
+      }
+    }
     ztoolkit.log("Failed to open review manager in tab", e);
     return false;
   }
 }
 
-function prepareTabContainer(doc: Document, container: Element) {
+async function prepareTabContainer(
+  ctx: ManagerContext,
+  doc: Document,
+  container: Element,
+) {
   const host = container as HTMLElement;
   if (host?.style) {
     host.style.width = "100%";
@@ -263,77 +334,100 @@ function prepareTabContainer(doc: Document, container: Element) {
   while (container.firstChild) {
     container.removeChild(container.firstChild);
   }
-  const root = createHTMLElement(doc, "div");
-  root.id = REVIEW_MANAGER_ROOT_ID;
-  Object.assign(root.style, {
-    width: "100%",
-    maxWidth: "100%",
-    height: "100%",
-    maxHeight: "100%",
-    minWidth: "0",
-    minHeight: "0",
-    overflow: "hidden",
-    boxSizing: "border-box",
-  });
-  container.appendChild(root);
+
+  const frame = createXULElement(doc, "iframe") as XULElement & {
+    contentWindow?: Window | null;
+    contentDocument?: Document | null;
+  };
+  frame.setAttribute("flex", "1");
+  frame.setAttribute("src", REVIEW_TAB_PAGE_URL);
+  frame.setAttribute("transparent", "true");
+  (frame as unknown as HTMLElement).style.border = "0";
+  (frame as unknown as HTMLElement).style.width = "100%";
+  (frame as unknown as HTMLElement).style.height = "100%";
+  const frameReady = waitForFrameReady(frame);
+  container.appendChild(frame);
+
+  const frameWin = await frameReady;
+  ctx.helper = {
+    mainWindow: getManagerMainWindow(ctx) || doc.defaultView,
+    window: frameWin,
+    frame,
+  };
+  mountManagerUI(ctx);
 }
 
 function openReviewManagerInDialog(ctx: ManagerContext) {
-  ctx.mode = "dialog";
-  const dialogData: Record<string, any> = {
-    loadCallback: () => {
-      const mount = () => {
-        if (!ctx.helper?.window) {
-          setTimeout(mount, 0);
-          return;
-        }
-        try {
-          setupReviewManagerDialogWindow(ctx.helper.window as Window);
-          mountManagerUI(ctx);
-          void refreshAndRender(ctx);
-        } catch (e) {
-          ztoolkit.log("Failed to mount review manager dialog", e);
-        }
-      };
-      mount();
-    },
-    unloadCallback: () => {
-      if (addon?.data?.dialogs) {
-        delete addon.data.dialogs.reviewManager;
-      }
-      if (managerContext === ctx) {
-        managerContext = null;
-      }
-    },
-  };
-
-  const helper = new ztoolkit.Dialog(1, 1)
-    .addCell(0, 0, {
-      tag: "div",
-      namespace: "html",
-      id: REVIEW_MANAGER_ROOT_ID,
-      styles: {
-        width: `${REVIEW_DIALOG_DEFAULT_WIDTH - 48}px`,
-        minWidth: `${REVIEW_DIALOG_DEFAULT_WIDTH - 48}px`,
-        maxWidth: `${REVIEW_DIALOG_DEFAULT_WIDTH - 48}px`,
-        height: `${REVIEW_DIALOG_DEFAULT_HEIGHT - 120}px`,
-        minHeight: `${REVIEW_DIALOG_DEFAULT_HEIGHT - 120}px`,
-        maxHeight: `${REVIEW_DIALOG_DEFAULT_HEIGHT - 120}px`,
-        overflow: "hidden",
-        boxSizing: "border-box",
+  return new Promise<void>((resolve) => {
+    let resolved = false;
+    const finishOpen = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+    ctx.mode = "dialog";
+    const dialogData: Record<string, any> = {
+      loadCallback: () => {
+        const mount = () => {
+          if (!ctx.helper?.window) {
+            setTimeout(mount, 0);
+            return;
+          }
+          try {
+            setupReviewManagerDialogWindow(ctx.helper.window as Window);
+            mountManagerUI(ctx);
+            void refreshAndRender(ctx).finally(() => finishOpen());
+          } catch (e) {
+            ztoolkit.log("Failed to mount review manager dialog", e);
+            finishOpen();
+          }
+        };
+        mount();
       },
-    })
-    .addButton("关闭", "close")
-    .setDialogData(dialogData)
-    .open("文献综述");
-  ctx.helper = helper;
+      unloadCallback: () => {
+        if (addon?.data?.dialogs) {
+          delete addon.data.dialogs.reviewManager;
+        }
+        if (managerContext === ctx) {
+          managerContext = null;
+        }
+      },
+    };
 
-  addon.data.dialogs = addon.data.dialogs || {};
-  addon.data.dialogs.reviewManager = helper;
+    const helper = new ztoolkit.Dialog(1, 1)
+      .addCell(0, 0, {
+        tag: "div",
+        namespace: "html",
+        id: REVIEW_MANAGER_ROOT_ID,
+        styles: {
+          width: `${REVIEW_DIALOG_DEFAULT_WIDTH - 48}px`,
+          minWidth: `${REVIEW_DIALOG_DEFAULT_WIDTH - 48}px`,
+          maxWidth: `${REVIEW_DIALOG_DEFAULT_WIDTH - 48}px`,
+          height: `${REVIEW_DIALOG_DEFAULT_HEIGHT - 120}px`,
+          minHeight: `${REVIEW_DIALOG_DEFAULT_HEIGHT - 120}px`,
+          maxHeight: `${REVIEW_DIALOG_DEFAULT_HEIGHT - 120}px`,
+          overflow: "hidden",
+          boxSizing: "border-box",
+        },
+      })
+      .addButton("关闭", "close")
+      .setDialogData(dialogData)
+      .open("文献综述");
+    ctx.helper = helper;
 
-  if (dialogData.unloadLock?.promise) {
-    void dialogData.unloadLock.promise.catch(() => undefined);
-  }
+    addon.data.dialogs = addon.data.dialogs || {};
+    addon.data.dialogs.reviewManager = helper;
+
+    if (dialogData.unloadLock?.promise) {
+      void dialogData.unloadLock.promise.catch(() => undefined);
+    }
+    const mainWin = getTargetMainWindow();
+    if (mainWin) {
+      scheduleWindowTask(mainWin, 200, finishOpen);
+    } else {
+      setTimeout(finishOpen, 200);
+    }
+  });
 }
 
 function setupReviewManagerDialogWindow(win: Window) {
@@ -371,26 +465,18 @@ async function refreshAndRender(ctx: ManagerContext) {
 
 async function refreshManagerData(ctx: ManagerContext) {
   const { state } = ctx;
-  const settings = getReviewSettings();
-  state.literaturePromptFieldKeys = parseReviewPromptFieldKeys(
-    settings.customPromptTemplate,
-  );
   state.folders = await listReviewFolders();
   state.totalRows = await countReviewRecords({
     recordType: state.viewMode,
     search: state.search,
     folderID: state.folderFilterID,
   });
-  const totalPages = getTotalPages(state.totalRows, state.pageSize);
-  state.page = Math.min(Math.max(1, state.page), totalPages);
   state.rows = await listReviewRecords({
     recordType: state.viewMode,
     search: state.search,
     folderID: state.folderFilterID,
     sortKey: state.sortKey,
     sortDir: state.sortDir,
-    limit: state.pageSize,
-    offset: (state.page - 1) * state.pageSize,
   });
 
   const validRecordIDs = new Set(state.rows.map((row) => row.id));
@@ -458,6 +544,7 @@ function mountManagerUI(ctx: ManagerContext) {
   root.style.gap = "10px";
   root.style.padding = "12px";
   root.style.overflow = "hidden";
+  root.style.position = "relative";
   root.style.fontFamily =
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
   root.style.background = "#f8fafc";
@@ -466,6 +553,7 @@ function mountManagerUI(ctx: ManagerContext) {
     style: {
       display: "flex",
       alignItems: "center",
+      flexWrap: "wrap",
       justifyContent: "space-between",
       gap: "8px",
       padding: "8px 10px",
@@ -484,6 +572,31 @@ function mountManagerUI(ctx: ManagerContext) {
     },
   });
 
+  const filterStatusText = createEl(doc, "span", {
+    text: "筛选：全部文件夹",
+    style: {
+      fontSize: "12px",
+      color: "#334155",
+      whiteSpace: "nowrap",
+      background: "#eef2ff",
+      border: "1px solid #dbeafe",
+      borderRadius: "999px",
+      padding: "2px 10px",
+    },
+  }) as HTMLSpanElement;
+  const selectionText = createEl(doc, "span", {
+    text: "未选择",
+    style: {
+      fontSize: "12px",
+      color: "#334155",
+      background: "#f1f5f9",
+      border: "1px solid #e2e8f0",
+      borderRadius: "999px",
+      padding: "2px 10px",
+      whiteSpace: "nowrap",
+    },
+  }) as HTMLSpanElement;
+
   const statusText = createEl(doc, "div", {
     text: "加载中...",
     style: {
@@ -494,9 +607,24 @@ function mountManagerUI(ctx: ManagerContext) {
       borderRadius: "999px",
       padding: "2px 10px",
       whiteSpace: "nowrap",
+      minWidth: "0",
+      maxWidth: "100%",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
     },
   });
-  titleRow.append(titleText, statusText);
+  const titleMetaWrap = createEl(doc, "div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      flexWrap: "wrap",
+      gap: "8px",
+      marginLeft: "auto",
+    },
+  });
+  titleMetaWrap.append(filterStatusText, selectionText, statusText);
+  titleRow.append(titleText, titleMetaWrap);
 
   const toolbar = createEl(doc, "div", {
     style: {
@@ -533,42 +661,7 @@ function mountManagerUI(ctx: ManagerContext) {
   const viewSummaryBtn = createButton(doc, "合并综述");
   const sortKeyBtn = createButton(doc, "排序：更新时间");
   const sortDirBtn = createButton(doc, "降序");
-  const filterStatusText = createEl(doc, "span", {
-    text: "筛选：全部文件夹",
-    style: {
-      fontSize: "12px",
-      color: "#334155",
-      whiteSpace: "nowrap",
-      background: "#eef2ff",
-      border: "1px solid #dbeafe",
-      borderRadius: "999px",
-      padding: "2px 10px",
-    },
-  }) as HTMLSpanElement;
-  const pagePrevBtn = createButton(doc, "上一页");
-  const pageNextBtn = createButton(doc, "下一页");
-  const pageInfoText = createEl(doc, "span", {
-    text: "第 1/1 页",
-    style: {
-      fontSize: "12px",
-      color: "#334155",
-      whiteSpace: "nowrap",
-      background: "#f1f5f9",
-      border: "1px solid #e2e8f0",
-      borderRadius: "999px",
-      padding: "2px 10px",
-    },
-  }) as HTMLSpanElement;
-
-  toolbar.append(
-    searchInput,
-    sortKeyBtn,
-    sortDirBtn,
-    filterStatusText,
-    pagePrevBtn,
-    pageNextBtn,
-    pageInfoText,
-  );
+  toolbar.append(searchInput, sortKeyBtn, sortDirBtn);
 
   const actionBar = createEl(doc, "div", {
     style: {
@@ -583,8 +676,8 @@ function mountManagerUI(ctx: ManagerContext) {
     },
   });
 
-  const btnRefresh = createButton(doc, "刷新");
   const btnCreateFolder = createButton(doc, "新建文件夹");
+  const btnRenameFolder = createButton(doc, "重命名文件夹");
   const btnDeleteFolder = createButton(doc, "删除文件夹");
   const btnMergeFolder = createButton(doc, "合并文件夹");
   const btnFolderSummary = createButton(doc, "合并综述");
@@ -593,8 +686,8 @@ function mountManagerUI(ctx: ManagerContext) {
   const btnDeleteSelected = createButton(doc, "删除记录");
   const btnSelectAll = createButton(doc, "全选");
   const btnClearSelection = createButton(doc, "清空选择");
-  const btnOpenItem = createButton(doc, "定位条目");
-  const btnPreviewRaw = createButton(doc, "查看原始记录");
+  const btnPreviewRaw = createButton(doc, "编辑记录");
+  const btnCreateNote = createButton(doc, "生成笔记");
   const btnExport = createButton(doc, "导出表格");
   const actionDividerA = createEl(doc, "span", {
     style: {
@@ -612,21 +705,9 @@ function mountManagerUI(ctx: ManagerContext) {
       margin: "0 2px",
     },
   });
-  const selectionText = createEl(doc, "span", {
-    text: "未选择",
-    style: {
-      fontSize: "12px",
-      color: "#334155",
-      background: "#f1f5f9",
-      border: "1px solid #e2e8f0",
-      borderRadius: "999px",
-      padding: "2px 10px",
-    },
-  });
-
   actionBar.append(
-    btnRefresh,
     btnCreateFolder,
+    btnRenameFolder,
     btnDeleteFolder,
     btnMergeFolder,
     btnFolderSummary,
@@ -634,13 +715,12 @@ function mountManagerUI(ctx: ManagerContext) {
     btnMoveSelected,
     btnRemoveSelected,
     btnDeleteSelected,
+    btnPreviewRaw,
+    actionDividerB,
     btnSelectAll,
     btnClearSelection,
-    actionDividerB,
-    btnOpenItem,
-    btnPreviewRaw,
     btnExport,
-    selectionText,
+    btnCreateNote,
   );
 
   const content = createEl(doc, "div", {
@@ -866,19 +946,28 @@ function mountManagerUI(ctx: ManagerContext) {
     sortKeyBtn,
     sortDirBtn,
     filterStatusText,
-    pagePrevBtn,
-    pageNextBtn,
-    pageInfoText,
     table,
     tableHeadRow: headRow,
     tableBody,
     preview,
     selectionText,
+    btnCreateFolder,
+    btnRenameFolder,
+    btnDeleteFolder,
+    btnMergeFolder,
+    btnFolderSummary,
+    btnMoveSelected,
+    btnRemoveSelected,
+    btnDeleteSelected,
+    btnSelectAll,
+    btnClearSelection,
+    btnPreviewRaw,
+    btnCreateNote,
+    btnExport,
   };
 
   searchInput.addEventListener("input", () => {
     ctx.state.search = searchInput.value.trim();
-    ctx.state.page = 1;
     void refreshAndRender(ctx);
   });
   searchInput.addEventListener("focus", () => {
@@ -898,48 +987,37 @@ function mountManagerUI(ctx: ManagerContext) {
 
   sortKeyBtn.addEventListener("click", () => {
     ctx.state.sortKey = cycleSortKey(ctx.state.sortKey);
-    ctx.state.page = 1;
     void refreshAndRender(ctx);
   });
 
   sortDirBtn.addEventListener("click", () => {
     ctx.state.sortDir = ctx.state.sortDir === "desc" ? "asc" : "desc";
-    ctx.state.page = 1;
-    void refreshAndRender(ctx);
-  });
-
-  pagePrevBtn.addEventListener("click", () => {
-    if (ctx.state.page <= 1) return;
-    ctx.state.page -= 1;
-    void refreshAndRender(ctx);
-  });
-
-  pageNextBtn.addEventListener("click", () => {
-    const totalPages = getTotalPages(ctx.state.totalRows, ctx.state.pageSize);
-    if (ctx.state.page >= totalPages) return;
-    ctx.state.page += 1;
-    void refreshAndRender(ctx);
-  });
-
-  btnRefresh.addEventListener("click", () => {
     void refreshAndRender(ctx);
   });
 
   btnCreateFolder.addEventListener("click", async () => {
-    const name = win.prompt("请输入新文件夹名称", "");
-    if (!name) return;
+    const name = await promptForFolderName(ctx, "请输入新文件夹名称", "");
+    if (name == null) return;
+    if (!name) {
+      win.alert("文件夹名称不能为空");
+      return;
+    }
     try {
       const folder = await createReviewFolder(name);
-      ctx.state.selectedFolderIDs = new Set([folder.id]);
-      ctx.state.moveTargetFolderID = folder.id;
+      applyFocusedFolderState(ctx, folder.id);
       await trackReviewEvent("folder_create", {
         timestamp: new Date().toISOString(),
         folder_name: folder.name,
       });
       await refreshAndRender(ctx);
+      showManagerToast(`已创建文件夹“${folder.name}”`);
     } catch (e: any) {
       win.alert(`创建文件夹失败：${e?.message || e}`);
     }
+  });
+
+  btnRenameFolder.addEventListener("click", async () => {
+    await handleRenameFolderRequest(ctx, resolveFolderForRename(ctx));
   });
 
   btnDeleteFolder.addEventListener("click", async () => {
@@ -995,8 +1073,12 @@ function mountManagerUI(ctx: ManagerContext) {
       win.alert(`系统文件夹不可合并：${locked.map((f) => f.name).join("、")}`);
       return;
     }
-    const newName = win.prompt("合并后的新文件夹名称", "");
-    if (!newName) return;
+    const newName = await promptForFolderName(ctx, "合并后的新文件夹名称", "");
+    if (newName == null) return;
+    if (!newName) {
+      win.alert("合并后的文件夹名称不能为空");
+      return;
+    }
     try {
       const newFolder = await mergeReviewFolders(ids, newName);
       await trackReviewEvent("folder_merge", {
@@ -1004,9 +1086,9 @@ function mountManagerUI(ctx: ManagerContext) {
         folder_count: ids.length,
         new_folder_name: newFolder.name,
       });
-      ctx.state.selectedFolderIDs = new Set([newFolder.id]);
-      ctx.state.moveTargetFolderID = newFolder.id;
+      applyFocusedFolderState(ctx, newFolder.id);
       await refreshAndRender(ctx);
+      showManagerToast(`已合并为文件夹“${newFolder.name}”`);
     } catch (e: any) {
       win.alert(`合并文件夹失败：${e?.message || e}`);
     }
@@ -1223,19 +1305,6 @@ function mountManagerUI(ctx: ManagerContext) {
     renderManager(ctx);
   });
 
-  btnOpenItem.addEventListener("click", () => {
-    const row = getPrimarySelectedRow(ctx);
-    if (!row) {
-      win.alert("请先选择一条记录");
-      return;
-    }
-    if (row.recordType === "folderSummary") {
-      win.alert("当前记录为合并综述，不对应单个 Zotero 条目");
-      return;
-    }
-    focusZoteroItem(row.zoteroItemID);
-  });
-
   btnPreviewRaw.addEventListener("click", async () => {
     const row = getPrimarySelectedRow(ctx);
     if (!row) {
@@ -1247,12 +1316,101 @@ function mountManagerUI(ctx: ManagerContext) {
       win.alert("记录不存在，可能已被删除");
       return;
     }
-    const raw = detail.rawAIResponse?.trim();
-    if (!raw) {
-      win.alert("该记录没有原始结果");
+    await openRawRecordEditorDialog(ctx, detail);
+  });
+
+  btnCreateNote.addEventListener("click", async () => {
+    if (ctx.state.viewMode !== "literature") {
+      win.alert("当前视图为合并综述，仅支持文献记录生成原生笔记");
       return;
     }
-    await openRawRecordEditorDialog(ctx, detail);
+
+    const selectedRows = getSelectedRows(ctx).filter(
+      (row) => row.recordType !== "folderSummary",
+    );
+    if (!selectedRows.length) {
+      win.alert("请先在表格中勾选至少一条文献记录");
+      return;
+    }
+
+    const generatedAt = new Date();
+    const progress = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+      closeOnClick: true,
+      closeTime: -1,
+    })
+      .createLine({
+        text: `正在创建原生笔记（共 ${selectedRows.length} 条）`,
+        type: "default",
+        progress: 0,
+      })
+      .show();
+
+    const results: Array<{
+      title: string;
+      ok: boolean;
+      error?: string;
+    }> = [];
+
+    for (let index = 0; index < selectedRows.length; index += 1) {
+      const row = selectedRows[index];
+      progress.changeLine({
+        text: `(${index + 1}/${selectedRows.length}) 正在创建笔记: ${truncate(row.title || `记录 ${row.id}`, 32)}`,
+        progress: Math.floor((index / selectedRows.length) * 100),
+      });
+
+      try {
+        const detail = await getReviewRecordByID(row.id);
+        if (!detail) {
+          throw new Error("记录不存在，可能已被删除");
+        }
+        await createNativeNoteForReviewRecord(detail, { generatedAt });
+        results.push({
+          title: detail.title || `记录 ${detail.id}`,
+          ok: true,
+        });
+      } catch (e: any) {
+        results.push({
+          title: row.title || `记录 ${row.id}`,
+          ok: false,
+          error: e?.message || String(e),
+        });
+      }
+    }
+
+    const successCount = results.filter((result) => result.ok).length;
+    const failCount = results.length - successCount;
+    progress.changeLine({
+      text: `原生笔记创建完成：成功 ${successCount}，失败 ${failCount}`,
+      type: failCount ? "default" : "success",
+      progress: 100,
+    });
+    progress.startCloseTimer(failCount ? 4500 : 1500);
+
+    await trackReviewEvent("native_note_create", {
+      timestamp: new Date().toISOString(),
+      record_count: selectedRows.length,
+      success_count: successCount,
+      fail_count: failCount,
+    }).catch((e) => ztoolkit.log(e));
+
+    if (!failCount) {
+      showManagerToast(`已在 ${successCount} 条 Zotero 文献下创建原生笔记`);
+      return;
+    }
+
+    win.alert(
+      [
+        `原生笔记创建完成：成功 ${successCount} 条，失败 ${failCount} 条。`,
+        "失败明细：",
+        results
+          .filter((result) => !result.ok)
+          .map(
+            (result) =>
+              `- ${truncate(result.title, 36)}: ${result.error || "未知错误"}`,
+          )
+          .join("\n"),
+      ].join("\n\n"),
+    );
   });
 
   btnExport.addEventListener("click", async () => {
@@ -1297,33 +1455,17 @@ function renderManager(ctx: ManagerContext) {
   syncViewButtonState(refs.viewSummaryBtn, state.viewMode === "folderSummary");
   refs.sortKeyBtn.textContent = `排序：${getSortKeyLabel(state.sortKey)}`;
   refs.sortDirBtn.textContent = state.sortDir === "desc" ? "降序" : "升序";
-  refs.filterStatusText.textContent = `视图：${getViewModeLabel(state.viewMode)} · 筛选：${
+  const folderFilterLabel =
     state.folderFilterID == null
       ? "全部文件夹"
       : state.folders.find((f) => f.id === state.folderFilterID)?.name ||
-        "已选文件夹"
-  } · 目标：${
-    state.moveTargetFolderID == null
-      ? "未设置"
-      : state.folders.find((f) => f.id === state.moveTargetFolderID)?.name ||
-        "已选文件夹"
-  }`;
-  const totalPages = getTotalPages(state.totalRows, state.pageSize);
-  refs.pageInfoText.textContent = `第 ${Math.min(state.page, totalPages)}/${totalPages} 页 · 共 ${state.totalRows} 条`;
-  refs.pagePrevBtn.disabled = state.page <= 1;
-  refs.pageNextBtn.disabled = state.page >= totalPages;
-  refs.pagePrevBtn.style.opacity = refs.pagePrevBtn.disabled ? "0.5" : "1";
-  refs.pageNextBtn.style.opacity = refs.pageNextBtn.disabled ? "0.5" : "1";
-  refs.pagePrevBtn.style.cursor = refs.pagePrevBtn.disabled
-    ? "default"
-    : "pointer";
-  refs.pageNextBtn.style.cursor = refs.pageNextBtn.disabled
-    ? "default"
-    : "pointer";
+        "已选文件夹";
+  refs.filterStatusText.textContent = `筛选：${folderFilterLabel}`;
 
   renderFolderButtons(ctx);
+  syncActionButtons(ctx);
 
-  refs.statusText.textContent = `${getViewModeLabel(state.viewMode)} · ${state.folders.length} 个文件夹 · 当前页 ${state.rows.length} 条 / 共 ${state.totalRows} 条`;
+  refs.statusText.textContent = `${getViewModeLabel(state.viewMode)} · ${state.folders.length} 个文件夹 · 共 ${state.totalRows} 条`;
   refs.selectionText.textContent = state.selectedRecordIDs.size
     ? `已选 ${state.selectedRecordIDs.size} 条`
     : "未选择";
@@ -1339,10 +1481,13 @@ function renderFolderButtons(ctx: ManagerContext) {
   if (!refs) return;
   const { state } = ctx;
   const doc = refs.folderList.ownerDocument!;
+  const activeFolderKey =
+    state.pendingFocusFolderKey ||
+    getFolderFocusKeyFromElement(doc.activeElement as Element | null);
   refs.folderList.innerHTML = "";
 
   const hint = createEl(doc, "div", {
-    text: "单击筛选；Ctrl/Cmd 可多选文件夹用于删除/合并",
+    text: "单击筛选；Ctrl/Cmd 可多选；双击或 F2 可重命名",
     style: {
       fontSize: "11px",
       color: "#64748b",
@@ -1357,9 +1502,13 @@ function renderFolderButtons(ctx: ManagerContext) {
     active: state.folderFilterID == null,
     selected: false,
     locked: true,
-    isMoveTarget: false,
+    focusKey: getFolderFocusKey(null),
+    title: "显示全部文件夹记录",
     onClick: (ev) => {
       handleFolderButtonClick(ctx, null, "我的记录", ev);
+    },
+    onKeyDown: (ev) => {
+      handleFolderButtonKeydown(ctx, null, ev);
     },
   });
   refs.folderList.appendChild(allBtn);
@@ -1371,13 +1520,135 @@ function renderFolderButtons(ctx: ManagerContext) {
       active: state.folderFilterID === folder.id,
       selected: state.selectedFolderIDs.has(folder.id),
       locked: isReserved,
-      isMoveTarget: state.moveTargetFolderID === folder.id,
+      focusKey: getFolderFocusKey(folder.id),
+      title: isReserved
+        ? `文件夹：${folder.name}`
+        : `文件夹：${folder.name}。双击可重命名`,
       onClick: (ev) => {
         handleFolderButtonClick(ctx, folder.id, folder.name, ev);
+      },
+      onDoubleClick: isReserved
+        ? undefined
+        : (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            void handleRenameFolderRequest(ctx, folder);
+          },
+      onKeyDown: (ev) => {
+        handleFolderButtonKeydown(ctx, folder, ev);
       },
     });
     refs.folderList.appendChild(btn);
   }
+  if (activeFolderKey) {
+    scheduleFocusRestore(
+      ctx,
+      () => focusFolderButtonByKey(ctx, activeFolderKey),
+      "folder",
+    );
+  }
+  state.pendingFocusFolderKey = null;
+}
+
+function syncActionButtons(ctx: ManagerContext) {
+  const refs = ctx.refs;
+  if (!refs) return;
+
+  const selectedFolders = getSelectedConcreteFolders(ctx);
+  const singleFolder = selectedFolders.length === 1 ? selectedFolders[0] : null;
+  const protectedSelected = selectedFolders.some((folder) =>
+    isProtectedFolderName(folder.name),
+  );
+  const summaryFolder = resolveFolderForSummary(ctx);
+  const removableFolder = resolveFolderForRecordRemoval(ctx);
+  const primaryRow = getPrimarySelectedRow(ctx);
+  const recordSelectionCount = ctx.state.selectedRecordIDs.size;
+
+  setButtonEnabled(refs.btnCreateFolder, true, "创建一个新文件夹");
+  setButtonEnabled(
+    refs.btnRenameFolder,
+    Boolean(resolveFolderForRename(ctx)),
+    singleFolder
+      ? "重命名当前选中的文件夹"
+      : "请先在左侧只选中一个可重命名文件夹",
+  );
+  setButtonEnabled(
+    refs.btnDeleteFolder,
+    selectedFolders.length > 0 && !protectedSelected,
+    protectedSelected
+      ? "系统文件夹不能删除"
+      : selectedFolders.length
+        ? "删除当前选中的文件夹"
+        : "请先在左侧选中文件夹",
+  );
+  setButtonEnabled(
+    refs.btnMergeFolder,
+    selectedFolders.length >= 2 && !protectedSelected,
+    protectedSelected
+      ? "系统文件夹不能参与合并"
+      : selectedFolders.length >= 2
+        ? "合并当前选中的文件夹"
+        : "请至少选择两个文件夹",
+  );
+  setButtonEnabled(
+    refs.btnFolderSummary,
+    Boolean(summaryFolder),
+    summaryFolder
+      ? `对“${summaryFolder.name}”执行合并综述`
+      : "请先在左侧选中一个文件夹",
+  );
+  setButtonEnabled(
+    refs.btnMoveSelected,
+    recordSelectionCount > 0 && Boolean(resolveMoveTargetFolderID(ctx)),
+    recordSelectionCount
+      ? resolveMoveTargetFolderID(ctx)
+        ? "将选中记录加入目标文件夹"
+        : "请先在左侧选择一个目标文件夹"
+      : "请先在表格中勾选记录",
+  );
+  setButtonEnabled(
+    refs.btnRemoveSelected,
+    recordSelectionCount > 0 &&
+      Boolean(removableFolder) &&
+      !isProtectedFolderName(removableFolder?.name || ""),
+    removableFolder
+      ? `将选中记录从“${removableFolder.name}”移出`
+      : "请先选中一个可移出的文件夹",
+  );
+  setButtonEnabled(
+    refs.btnDeleteSelected,
+    recordSelectionCount > 0,
+    recordSelectionCount ? "删除当前勾选的记录" : "请先在表格中勾选记录",
+  );
+  setButtonEnabled(
+    refs.btnSelectAll,
+    ctx.state.rows.length > 0,
+    ctx.state.rows.length ? "全选当前表格记录" : "当前没有可选记录",
+  );
+  setButtonEnabled(
+    refs.btnClearSelection,
+    recordSelectionCount > 0,
+    recordSelectionCount ? "清空当前记录选择" : "当前没有已选记录",
+  );
+  setButtonEnabled(
+    refs.btnPreviewRaw,
+    Boolean(primaryRow),
+    primaryRow ? "编辑当前记录内容" : "请先选择一条记录",
+  );
+  setButtonEnabled(
+    refs.btnCreateNote,
+    ctx.state.viewMode === "literature" && recordSelectionCount > 0,
+    ctx.state.viewMode !== "literature"
+      ? "仅文献记录视图支持生成原生笔记"
+      : recordSelectionCount
+        ? "为选中的文献记录创建 Zotero 原生笔记"
+        : "请先在表格中勾选记录",
+  );
+  setButtonEnabled(
+    refs.btnExport,
+    ctx.state.rows.length > 0,
+    ctx.state.rows.length ? "导出当前视图记录" : "当前没有可导出的记录",
+  );
 }
 
 function handleFolderButtonClick(
@@ -1386,12 +1657,12 @@ function handleFolderButtonClick(
   _folderName: string,
   ev: MouseEvent,
 ) {
+  ctx.state.pendingFocusFolderKey = getFolderFocusKey(folderID);
   const isAdditive = Boolean(ev.ctrlKey || ev.metaKey);
   const isVirtualAll = folderID == null;
 
   if (!isAdditive) {
     ctx.state.folderFilterID = folderID;
-    ctx.state.page = 1;
     if (isVirtualAll) {
       ctx.state.moveTargetFolderID = null;
       ctx.state.selectedFolderIDs.clear();
@@ -1415,11 +1686,92 @@ function handleFolderButtonClick(
     ctx.state.selectedFolderIDs.add(folderID);
   }
 
-  if (ctx.state.selectedFolderIDs.size === 1) {
-    ctx.state.moveTargetFolderID =
-      Array.from(ctx.state.selectedFolderIDs)[0] || null;
-  }
+  syncMoveTargetFolder(ctx);
   renderManager(ctx);
+}
+
+function focusFolderButtonByKey(ctx: ManagerContext, focusKey: string) {
+  const refs = ctx.refs;
+  if (!refs) return;
+  const btn = refs.folderList.querySelector(
+    `button[data-folder-focus-key="${cssEscapeCompat(focusKey)}"]`,
+  );
+  if (isFocusableElement(btn)) {
+    btn.focus();
+  }
+}
+
+function handleFolderButtonKeydown(
+  ctx: ManagerContext,
+  folder: ReviewFolderRow | null,
+  ev: KeyboardEvent,
+) {
+  switch (ev.key) {
+    case "ArrowDown":
+      ev.preventDefault();
+      focusAdjacentFolderButton(ctx, ev.currentTarget as HTMLButtonElement, 1);
+      return;
+    case "ArrowUp":
+      ev.preventDefault();
+      focusAdjacentFolderButton(ctx, ev.currentTarget as HTMLButtonElement, -1);
+      return;
+    case "Home":
+      ev.preventDefault();
+      focusAdjacentFolderButton(
+        ctx,
+        ev.currentTarget as HTMLButtonElement,
+        -999,
+      );
+      return;
+    case "End":
+      ev.preventDefault();
+      focusAdjacentFolderButton(
+        ctx,
+        ev.currentTarget as HTMLButtonElement,
+        999,
+      );
+      return;
+    case "F2":
+      if (folder && !isProtectedFolderName(folder.name)) {
+        ev.preventDefault();
+        void handleRenameFolderRequest(ctx, folder);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+function focusAdjacentFolderButton(
+  ctx: ManagerContext,
+  current: HTMLButtonElement,
+  step: number,
+) {
+  const buttons = getFolderNavButtons(ctx);
+  if (!buttons.length) return;
+  const currentIndex = buttons.indexOf(current);
+  if (currentIndex < 0) {
+    buttons[0]?.focus();
+    return;
+  }
+  if (step <= -999) {
+    buttons[0]?.focus();
+    return;
+  }
+  if (step >= 999) {
+    buttons[buttons.length - 1]?.focus();
+    return;
+  }
+  const nextIndex = clampNumber(currentIndex + step, 0, buttons.length - 1);
+  buttons[nextIndex]?.focus();
+}
+
+function getFolderNavButtons(ctx: ManagerContext) {
+  const refs = ctx.refs;
+  if (!refs) return [] as HTMLButtonElement[];
+  return Array.from(
+    refs.folderList.querySelectorAll("button[data-folder-nav='1']"),
+  ) as HTMLButtonElement[];
 }
 
 function createFolderButton(
@@ -1429,12 +1781,18 @@ function createFolderButton(
     active: boolean;
     selected: boolean;
     locked: boolean;
-    isMoveTarget: boolean;
+    focusKey: string;
     onClick: (ev: MouseEvent) => void;
+    onDoubleClick?: (ev: MouseEvent) => void;
+    onKeyDown?: (ev: KeyboardEvent) => void;
+    title?: string;
   },
 ) {
   const btn = createHTMLElement(doc, "button");
   btn.type = "button";
+  btn.dataset.folderNav = "1";
+  btn.dataset.folderFocusKey = options.focusKey;
+  btn.title = options.title || "";
   btn.style.width = "100%";
   btn.style.textAlign = "left";
   btn.style.padding = "7px 9px";
@@ -1461,7 +1819,6 @@ function createFolderButton(
 
   const badges: string[] = [];
   if (options.locked) badges.push("固定");
-  if (options.isMoveTarget) badges.push("目标");
   if (options.selected) badges.push("已选");
   if (badges.length) {
     const badge = createHTMLElement(doc, "span");
@@ -1476,6 +1833,12 @@ function createFolderButton(
   }
 
   btn.addEventListener("click", options.onClick);
+  if (options.onDoubleClick) {
+    btn.addEventListener("dblclick", options.onDoubleClick);
+  }
+  if (options.onKeyDown) {
+    btn.addEventListener("keydown", options.onKeyDown);
+  }
   return btn;
 }
 
@@ -1551,16 +1914,11 @@ function getCurrentTableColumns(ctx: ManagerContext): TableColumnSpec[] {
   if (ctx.state.viewMode === "folderSummary") {
     return getFolderSummaryTableColumns();
   }
-  return getLiteratureTableColumns(ctx.state.literaturePromptFieldKeys);
+  return getLiteratureTableColumns();
 }
 
-function getLiteratureTableColumns(
-  promptFieldKeys: ReviewPromptFieldKey[],
-): TableColumnSpec[] {
-  const fields = normalizeLiteraturePromptFieldKeys(promptFieldKeys);
-  const orderedFields: ReviewPromptFieldKey[] = fields.length
-    ? fields
-    : ["title", "authors", "journal", "publicationDate", "classificationTags"];
+function getLiteratureTableColumns(): TableColumnSpec[] {
+  const orderedFields = [...FIXED_LITERATURE_TABLE_FIELDS];
   if (!orderedFields.includes("title")) {
     orderedFields.unshift("title");
   }
@@ -1615,28 +1973,6 @@ function getFolderSummaryTableColumns(): TableColumnSpec[] {
       renderCell: (_ctx, row) => formatTime(row.updatedAt),
     },
   ];
-}
-
-function normalizeLiteraturePromptFieldKeys(
-  promptFieldKeys: ReviewPromptFieldKey[],
-) {
-  const supported: ReviewPromptFieldKey[] = [
-    "title",
-    "authors",
-    "journal",
-    "publicationDate",
-    "abstract",
-    "researchBackground",
-    "literatureReview",
-    "researchMethods",
-    "researchConclusions",
-    "keyFindings",
-    "classificationTags",
-    "pdfAnnotationNotesText",
-  ];
-  const allowed = new Set(supported);
-  const keys = (promptFieldKeys || []).filter((key) => allowed.has(key));
-  return Array.from(new Set(keys));
 }
 
 function buildSelectionColumn(): TableColumnSpec {
@@ -1840,6 +2176,7 @@ function renderTableBody(ctx: ManagerContext, columns: TableColumnSpec[]) {
 
   state.rows.forEach((row, rowIndex) => {
     const tr = createHTMLElement(doc, "tr");
+    tr.dataset.recordId = String(row.id);
     tr.style.borderBottom = "1px solid #f1f5f9";
     const baseBackground = state.selectedRecordIDs.has(row.id)
       ? "#e8f1ff"
@@ -1961,6 +2298,173 @@ function getPrimarySelectedRow(ctx: ManagerContext) {
   return null;
 }
 
+function getSelectedRows(ctx: ManagerContext) {
+  return ctx.state.rows.filter((row) =>
+    ctx.state.selectedRecordIDs.has(row.id),
+  );
+}
+
+function getSelectedConcreteFolders(ctx: ManagerContext) {
+  return Array.from(ctx.state.selectedFolderIDs)
+    .map((id) => ctx.state.folders.find((folder) => folder.id === id))
+    .filter((folder): folder is ReviewFolderRow => Boolean(folder));
+}
+
+function formatSelectionSummary(ctx: ManagerContext) {
+  const folderCount = getSelectedConcreteFolders(ctx).length;
+  const recordCount = ctx.state.selectedRecordIDs.size;
+  if (!folderCount && !recordCount) return "未选择";
+  const parts: string[] = [];
+  if (folderCount) {
+    parts.push(`文件夹 ${folderCount}`);
+  }
+  if (recordCount) {
+    parts.push(`记录 ${recordCount}`);
+  }
+  return `已选 ${parts.join(" · ")}`;
+}
+
+function applyFocusedFolderState(ctx: ManagerContext, folderID: number | null) {
+  ctx.state.pendingFocusFolderKey = getFolderFocusKey(folderID);
+  ctx.state.folderFilterID = folderID;
+  if (folderID == null) {
+    ctx.state.selectedFolderIDs.clear();
+    ctx.state.moveTargetFolderID = null;
+    return;
+  }
+  ctx.state.selectedFolderIDs = new Set([folderID]);
+  ctx.state.moveTargetFolderID = folderID;
+}
+
+function syncMoveTargetFolder(ctx: ManagerContext) {
+  const selected = Array.from(ctx.state.selectedFolderIDs).filter(Boolean);
+  if (selected.length === 1) {
+    ctx.state.moveTargetFolderID = selected[0];
+    return;
+  }
+  if (selected.length > 1) {
+    if (
+      ctx.state.moveTargetFolderID == null ||
+      !selected.includes(ctx.state.moveTargetFolderID)
+    ) {
+      ctx.state.moveTargetFolderID = selected[0] || null;
+    }
+    return;
+  }
+  ctx.state.moveTargetFolderID = ctx.state.folderFilterID;
+}
+
+function getFolderFocusKey(folderID: number | null) {
+  return folderID == null ? "__all__" : String(folderID);
+}
+
+function getFolderFocusKeyFromElement(el: Element | null) {
+  const button = closestElement(
+    el,
+    "button[data-folder-focus-key]",
+  ) as HTMLButtonElement | null;
+  return button?.dataset.folderFocusKey || null;
+}
+
+function scheduleFocusRestore(
+  ctx: ManagerContext,
+  restore: () => void,
+  kind: "folder" | "record",
+) {
+  const win = (ctx.helper?.window || getTargetMainWindow()) as Window | null;
+  if (!win) return;
+  scheduleWindowTask(win, 0, () => {
+    const active = win.document?.activeElement as Element | null;
+    if (kind === "folder" && isTextEntryElement(active)) return;
+    if (kind === "record" && isTextEntryElement(active)) return;
+    restore();
+  });
+}
+
+function isTextEntryElement(el: Element | null) {
+  if (!isElementLike(el)) return false;
+  const tag = String((el as Element).tagName || "").toLowerCase();
+  return (
+    tag === "input" ||
+    tag === "textarea" ||
+    Boolean((el as any).isContentEditable) ||
+    (typeof (el as any).getAttribute === "function" &&
+      (el as any).getAttribute("role") === "textbox")
+  );
+}
+
+function isElementLike(value: unknown): value is Element {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof (value as any).nodeType === "number" &&
+    typeof (value as any).tagName === "string",
+  );
+}
+
+function closestElement(el: Element | null, selector: string) {
+  if (!isElementLike(el)) return null;
+  const closest = (el as any).closest;
+  if (typeof closest !== "function") return null;
+  try {
+    return (closest.call(el, selector) as Element | null) || null;
+  } catch {
+    return null;
+  }
+}
+
+function isFocusableElement(value: unknown): value is {
+  focus: () => void;
+} {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    typeof (value as any).focus === "function",
+  );
+}
+
+function resolveFolderForRename(ctx: ManagerContext): ReviewFolderRow | null {
+  const selectedFolders = getSelectedConcreteFolders(ctx);
+  if (selectedFolders.length !== 1) return null;
+  const target = selectedFolders[0];
+  return isProtectedFolderName(target.name) ? null : target;
+}
+
+async function handleRenameFolderRequest(
+  ctx: ManagerContext,
+  folder: ReviewFolderRow | null,
+) {
+  const win = (ctx.helper?.window || getTargetMainWindow()) as Window | null;
+  if (!folder) {
+    win?.alert?.("请先在左侧只选中一个可重命名文件夹");
+    return;
+  }
+  const nextName = await promptForFolderName(
+    ctx,
+    "请输入新的文件夹名称",
+    folder.name,
+  );
+  if (nextName == null) return;
+  if (!nextName) {
+    win?.alert?.("文件夹名称不能为空");
+    return;
+  }
+  try {
+    const renamed = await renameReviewFolder(folder.id, nextName);
+    applyFocusedFolderState(ctx, renamed.id);
+    await trackReviewEvent("folder_rename", {
+      timestamp: new Date().toISOString(),
+      folder_id: renamed.id,
+      old_folder_name: folder.name,
+      new_folder_name: renamed.name,
+    });
+    await refreshAndRender(ctx);
+    showManagerToast(`已将文件夹重命名为“${renamed.name}”`);
+  } catch (e: any) {
+    win?.alert?.(`重命名文件夹失败：${e?.message || e}`);
+  }
+}
+
 function resolveMoveTargetFolderID(ctx: ManagerContext) {
   if (
     ctx.state.moveTargetFolderID &&
@@ -2019,19 +2523,12 @@ function cycleSortKey(
   return order[(index + 1) % order.length];
 }
 
-function getTotalPages(totalRows: number, pageSize: number) {
-  const safeSize = Math.max(1, Math.floor(pageSize || 1));
-  const safeTotal = Math.max(0, Math.floor(totalRows || 0));
-  return Math.max(1, Math.ceil(safeTotal / safeSize));
-}
-
 function switchManagerView(
   ctx: ManagerContext,
   nextViewMode: ManagerState["viewMode"],
 ) {
   if (ctx.state.viewMode === nextViewMode) return;
   ctx.state.viewMode = nextViewMode;
-  ctx.state.page = 1;
   ctx.state.selectedRecordIDs.clear();
   ctx.state.selectionAnchorRecordID = null;
   void refreshAndRender(ctx);
@@ -2083,7 +2580,14 @@ async function openRawRecordEditorDialog(
   ctx: ManagerContext,
   row: ReviewRecordRow,
 ) {
-  const prettyRaw = tryPrettyJSON(row.rawAIResponse || "");
+  if (row.recordType !== "folderSummary") {
+    await openLiteratureRecordEditorDialog(ctx, row);
+    return;
+  }
+
+  const prettyRaw = tryPrettyJSON(
+    row.rawAIResponse || row.literatureReview || "",
+  );
   const dialogData: Record<string, any> = {
     rawText: prettyRaw,
     loadCallback: () => {
@@ -2102,7 +2606,7 @@ async function openRawRecordEditorDialog(
   const dialog = new ztoolkit.Dialog(4, 2)
     .addCell(0, 0, {
       tag: "h2",
-      properties: { innerHTML: "原始记录（可编辑）" },
+      properties: { innerHTML: "合并综述记录（可编辑）" },
       styles: { margin: "0", fontSize: "16px" },
     })
     .addCell(
@@ -2157,16 +2661,235 @@ async function openRawRecordEditorDialog(
     .addButton("保存", "save")
     .addButton("取消", "cancel")
     .setDialogData(dialogData)
-    .open(`原始记录 - ${truncate(row.title, 24)}`);
+    .open(`编辑记录 - ${truncate(row.title, 24)}`);
 
-  if (!dialogData.unloadLock?.promise) return;
-  await dialogData.unloadLock.promise;
+  if (!dialogData.unloadLock?.promise) {
+    focusManagerContext(ctx);
+    return;
+  }
+  await dialogData.unloadLock.promise.catch(() => undefined);
+  focusManagerContext(ctx);
   if (dialogData._lastButtonId !== "save") return;
 
   const nextRaw = String(dialogData.rawText || "");
   await updateReviewRecordRawResponse(row.id, nextRaw);
   await refreshAndRender(ctx);
-  showManagerToast("原始记录已保存");
+  showManagerToast("记录已保存");
+}
+
+async function openLiteratureRecordEditorDialog(
+  ctx: ManagerContext,
+  row: ReviewRecordRow,
+) {
+  const dialogData: Record<string, any> = {
+    title: row.title || "",
+    authors: row.authors || "",
+    journal: row.journal || "",
+    publicationDate: row.publicationDate || "",
+    abstractText: row.abstractText || "",
+    researchBackground: row.researchBackground || "",
+    literatureReview: row.literatureReview || "",
+    researchMethods: row.researchMethods || "",
+    researchConclusions: row.researchConclusions || "",
+    keyFindingsText: formatEditorListText(row.keyFindings || []),
+    classificationTagsText: formatEditorListText(row.classificationTags || []),
+    pdfAnnotationNotesText: row.pdfAnnotationNotesText || "",
+    loadCallback: () => {
+      try {
+        helper?.window?.document?.documentElement?.setAttribute("width", "980");
+        helper?.window?.document?.documentElement?.setAttribute(
+          "height",
+          "820",
+        );
+      } catch {
+        // ignore
+      }
+      const dialogWin = helper?.window as Window | null;
+      const titleInput = dialogWin?.document?.getElementById(
+        "review-record-edit-title",
+      ) as HTMLInputElement | null;
+      if (!dialogWin || !titleInput) return;
+      scheduleWindowTask(dialogWin, 0, () => {
+        try {
+          titleInput.focus();
+          titleInput.select();
+        } catch {
+          // ignore
+        }
+      });
+    },
+  };
+
+  const labelStyles = {
+    fontSize: "12px",
+    paddingTop: "6px",
+    verticalAlign: "top",
+    color: "#334155",
+  };
+  const inputStyles = {
+    width: "100%",
+    minWidth: "820px",
+    boxSizing: "border-box",
+    fontSize: "12px",
+    lineHeight: "1.4",
+    padding: "6px 8px",
+  };
+  const textareaStyles = {
+    ...inputStyles,
+    resize: "vertical",
+    lineHeight: "1.5",
+  };
+  const fields: Array<{
+    key: string;
+    label: string;
+    tag: "input" | "textarea";
+    rows?: string;
+    id?: string;
+    placeholder?: string;
+  }> = [
+    {
+      key: "title",
+      label: "标题",
+      tag: "input",
+      id: "review-record-edit-title",
+    },
+    { key: "authors", label: "作者", tag: "input" },
+    { key: "journal", label: "期刊", tag: "input" },
+    { key: "publicationDate", label: "发布时间", tag: "input" },
+    { key: "abstractText", label: "摘要", tag: "textarea", rows: "4" },
+    {
+      key: "researchBackground",
+      label: "研究背景",
+      tag: "textarea",
+      rows: "5",
+    },
+    {
+      key: "literatureReview",
+      label: "文献综述",
+      tag: "textarea",
+      rows: "6",
+    },
+    {
+      key: "researchMethods",
+      label: "研究方法",
+      tag: "textarea",
+      rows: "4",
+    },
+    {
+      key: "researchConclusions",
+      label: "研究结论",
+      tag: "textarea",
+      rows: "4",
+    },
+    {
+      key: "keyFindingsText",
+      label: "关键发现",
+      tag: "textarea",
+      rows: "6",
+      placeholder: "每行一条关键发现",
+    },
+    {
+      key: "pdfAnnotationNotesText",
+      label: "PDF批注与笔记",
+      tag: "textarea",
+      rows: "4",
+    },
+    {
+      key: "classificationTagsText",
+      label: "标签",
+      tag: "textarea",
+      rows: "3",
+      placeholder: "每行一个标签，或使用逗号分隔",
+    },
+  ];
+
+  const dialog = new ztoolkit.Dialog(fields.length + 1, 2)
+    .addCell(0, 0, {
+      tag: "h2",
+      properties: { innerHTML: "文献记录（可编辑）" },
+      styles: { margin: "0", fontSize: "16px" },
+    })
+    .addCell(
+      0,
+      1,
+      {
+        tag: "div",
+        namespace: "html",
+        properties: {
+          innerHTML: `${truncate(row.title, 28)} · ${getRecordFolderLabel(row)}`,
+        },
+        styles: {
+          fontSize: "12px",
+          color: "#475569",
+          textAlign: "right",
+          paddingTop: "4px",
+        },
+      },
+      false,
+    );
+
+  fields.forEach((field, index) => {
+    const rowIndex = index + 1;
+    dialog.addCell(rowIndex, 0, {
+      tag: "label",
+      namespace: "html",
+      attributes: field.id ? { for: field.id } : {},
+      properties: { innerHTML: field.label },
+      styles: labelStyles,
+    });
+    dialog.addCell(
+      rowIndex,
+      1,
+      {
+        tag: field.tag,
+        namespace: "html",
+        id: field.id,
+        attributes: {
+          ...(field.tag === "input" ? { type: "text" } : {}),
+          ...(field.rows ? { rows: field.rows } : {}),
+          ...(field.placeholder ? { placeholder: field.placeholder } : {}),
+          "data-bind": field.key,
+          "data-prop": "value",
+        },
+        styles: field.tag === "input" ? inputStyles : textareaStyles,
+      },
+      false,
+    );
+  });
+
+  const helper = dialog
+    .addButton("保存", "save")
+    .addButton("取消", "cancel")
+    .setDialogData(dialogData)
+    .open(`编辑记录 - ${truncate(row.title, 24)}`);
+
+  if (!dialogData.unloadLock?.promise) {
+    focusManagerContext(ctx);
+    return;
+  }
+
+  await dialogData.unloadLock.promise.catch(() => undefined);
+  focusManagerContext(ctx);
+  if (dialogData._lastButtonId !== "save") return;
+
+  await updateLiteratureReviewRecord(row.id, {
+    title: String(dialogData.title || ""),
+    authors: String(dialogData.authors || ""),
+    journal: String(dialogData.journal || ""),
+    publicationDate: String(dialogData.publicationDate || ""),
+    abstractText: String(dialogData.abstractText || ""),
+    pdfAnnotationNotesText: String(dialogData.pdfAnnotationNotesText || ""),
+    researchBackground: String(dialogData.researchBackground || ""),
+    literatureReview: String(dialogData.literatureReview || ""),
+    researchMethods: String(dialogData.researchMethods || ""),
+    researchConclusions: String(dialogData.researchConclusions || ""),
+    keyFindings: parseEditorLineList(String(dialogData.keyFindingsText || "")),
+    classificationTags: parseEditorTagList(
+      String(dialogData.classificationTagsText || ""),
+    ),
+  });
+  await refreshAndRender(ctx);
+  showManagerToast("记录已保存");
 }
 
 async function openFolderSummaryDialog(
@@ -2249,6 +2972,27 @@ async function openFolderSummaryDialog(
   if (dialogData.unloadLock?.promise) {
     await dialogData.unloadLock.promise.catch(() => undefined);
   }
+}
+
+function formatEditorListText(values: string[]) {
+  return (values || [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function parseEditorLineList(text: string) {
+  return String(text || "")
+    .split(/\r?\n+/)
+    .map((value) => value.replace(/^\s*(?:[-*•]\s*|\d+[.)]\s*)/, "").trim())
+    .filter(Boolean);
+}
+
+function parseEditorTagList(text: string) {
+  return String(text || "")
+    .split(/[\r\n,，;；]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
 }
 
 function tryPrettyJSON(text: string) {
@@ -2337,6 +3081,149 @@ function appendCell(
   tr.appendChild(td);
 }
 
+async function promptForFolderName(
+  ctx: ManagerContext,
+  message: string,
+  defaultValue = "",
+) {
+  const dialogData: Record<string, any> = {
+    folderName: String(defaultValue || ""),
+    loadCallback: () => {
+      try {
+        helper?.window?.document?.documentElement?.setAttribute("width", "520");
+        helper?.window?.document?.documentElement?.setAttribute(
+          "height",
+          "180",
+        );
+      } catch {
+        // ignore
+      }
+      const dialogWin = helper?.window as Window | null;
+      const input = dialogWin?.document?.getElementById(
+        "review-folder-name-input",
+      ) as HTMLInputElement | null;
+      if (!dialogWin || !input) return;
+      scheduleWindowTask(dialogWin, 0, () => {
+        try {
+          input.focus();
+          input.select();
+        } catch {
+          // ignore
+        }
+      });
+    },
+  };
+
+  const dialog = new ztoolkit.Dialog(2, 2)
+    .addCell(0, 0, {
+      tag: "label",
+      namespace: "html",
+      attributes: {
+        for: "review-folder-name-input",
+      },
+      properties: { innerHTML: message },
+      styles: {
+        fontSize: "12px",
+        paddingTop: "8px",
+        color: "#334155",
+        whiteSpace: "nowrap",
+      },
+    })
+    .addCell(
+      0,
+      1,
+      {
+        tag: "input",
+        namespace: "html",
+        id: "review-folder-name-input",
+        attributes: {
+          type: "text",
+          "data-bind": "folderName",
+          "data-prop": "value",
+          placeholder: "请输入文件夹名称",
+        },
+        styles: {
+          width: "100%",
+          minWidth: "320px",
+          boxSizing: "border-box",
+          fontSize: "13px",
+          lineHeight: "1.4",
+          padding: "6px 8px",
+        },
+      },
+      false,
+    )
+    .addCell(1, 1, {
+      tag: "div",
+      namespace: "html",
+      properties: {
+        innerHTML: "输入名称后点击“确定”保存。",
+      },
+      styles: {
+        fontSize: "11px",
+        color: "#64748b",
+        paddingTop: "4px",
+      },
+    });
+
+  const helper = dialog
+    .addButton("确定", "save")
+    .addButton("取消", "cancel")
+    .setDialogData(dialogData)
+    .open("文件夹名称");
+
+  if (!dialogData.unloadLock?.promise) {
+    focusManagerContext(ctx);
+    return null;
+  }
+
+  await dialogData.unloadLock.promise.catch(() => undefined);
+  focusManagerContext(ctx);
+  if (dialogData._lastButtonId !== "save") {
+    return null;
+  }
+  return String(dialogData.folderName || "").trim();
+}
+
+function scheduleWindowTask(win: Window, delayMS: number, task: () => void) {
+  try {
+    win.setTimeout(() => {
+      if ((win as any).closed) return;
+      task();
+    }, delayMS);
+  } catch {
+    task();
+  }
+}
+
+function setButtonEnabled(
+  btn: HTMLButtonElement,
+  enabled: boolean,
+  title?: string,
+) {
+  btn.disabled = !enabled;
+  btn.title = title || "";
+  if (btn.dataset.segmented === "1" || btn.dataset.active === "1") {
+    btn.style.opacity = enabled ? "1" : "0.55";
+    btn.style.cursor = enabled ? "pointer" : "not-allowed";
+    return;
+  }
+  btn.style.opacity = enabled ? "1" : "0.55";
+  btn.style.cursor = enabled ? "pointer" : "not-allowed";
+  btn.style.background = enabled ? "#fff" : "#f8fafc";
+  btn.style.borderColor = enabled ? "#cbd5e1" : "#e2e8f0";
+  btn.style.color = enabled ? "#0f172a" : "#94a3b8";
+}
+
+function cssEscapeCompat(value: string) {
+  const input = String(value || "");
+  const escapeFn = (globalThis as any)?.CSS?.escape;
+  if (typeof escapeFn === "function") {
+    return escapeFn(input);
+  }
+  return input.replace(/["\\]/g, "\\$&");
+}
+
 function createButton(doc: Document, label: string) {
   const btn = createHTMLElement(doc, "button");
   btn.type = "button";
@@ -2412,6 +3299,75 @@ function createHTMLElement<K extends keyof HTMLElementTagNameMap>(
   tag: K,
 ) {
   return doc.createElementNS(HTML_NS, tag) as HTMLElementTagNameMap[K];
+}
+
+function createXULElement(doc: Document, tag: string) {
+  const create = (doc as any).createXULElement;
+  if (typeof create === "function") {
+    return create.call(doc, tag);
+  }
+  return doc.createElementNS(XUL_NS, tag);
+}
+
+function waitForFrameReady(
+  frame: XULElement & {
+    contentWindow?: Window | null;
+    contentDocument?: Document | null;
+  },
+) {
+  const isReady = () =>
+    Boolean(
+      frame.contentWindow?.document?.getElementById(REVIEW_MANAGER_ROOT_ID),
+    );
+
+  if (isReady()) {
+    return Promise.resolve(frame.contentWindow as Window);
+  }
+
+  return new Promise<Window>((resolve, reject) => {
+    const pollWindow =
+      frame.ownerDocument?.defaultView || getTargetMainWindow() || globalThis;
+    let finished = false;
+    let attempts = 0;
+    const maxAttempts = 120;
+
+    const cleanup = () => {
+      finished = true;
+      frame.removeEventListener("load", onLoad as EventListener);
+      frame.removeEventListener("error", onError as EventListener);
+    };
+
+    const resolveWhenReady = () => {
+      if (finished) return;
+      if (isReady()) {
+        cleanup();
+        resolve(frame.contentWindow as Window);
+        return;
+      }
+      attempts += 1;
+      if (attempts >= maxAttempts) {
+        cleanup();
+        reject(new Error("review manager iframe load timed out"));
+        return;
+      }
+      try {
+        (pollWindow as Window).setTimeout(resolveWhenReady, 50);
+      } catch {
+        setTimeout(resolveWhenReady, 50);
+      }
+    };
+
+    const onLoad = () => {
+      resolveWhenReady();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("review manager iframe failed to load"));
+    };
+    frame.addEventListener("load", onLoad as EventListener, { once: true });
+    frame.addEventListener("error", onError as EventListener, { once: true });
+    resolveWhenReady();
+  });
 }
 
 function truncate(text: string, limit: number) {
@@ -2533,8 +3489,42 @@ function formatTime(iso: string) {
   }
 }
 
+function getMainWindowsCompat() {
+  const getMainWindows = (Zotero as any)?.getMainWindows;
+  if (typeof getMainWindows === "function") {
+    const wins = getMainWindows.call(Zotero);
+    if (Array.isArray(wins)) return wins as _ZoteroTypes.MainWindow[];
+  }
+  const getMainWindow = (Zotero as any)?.getMainWindow;
+  if (typeof getMainWindow === "function") {
+    const win = getMainWindow.call(Zotero);
+    return win ? ([win] as _ZoteroTypes.MainWindow[]) : [];
+  }
+
+  try {
+    const wm = (globalThis as any)?.Services?.wm;
+    if (wm?.getEnumerator) {
+      const wins: _ZoteroTypes.MainWindow[] = [];
+      for (const type of ["zotero:main", "navigator:browser"]) {
+        const enumerator = wm.getEnumerator(type);
+        while (enumerator?.hasMoreElements?.()) {
+          const win = enumerator.getNext();
+          if ((win as any)?.document) {
+            wins.push(win as _ZoteroTypes.MainWindow);
+          }
+        }
+        if (wins.length) return wins;
+      }
+    }
+  } catch (e) {
+    ztoolkit.log("getMainWindowsCompat fallback failed", e);
+  }
+
+  return [] as _ZoteroTypes.MainWindow[];
+}
+
 function focusZoteroItem(itemID: number) {
-  const wins = Zotero.getMainWindows?.() || [];
+  const wins = getMainWindowsCompat();
   const win = wins[0] as any;
   if (!win) {
     ztoolkit.getGlobal("alert")("无法定位条目：未找到 Zotero 主窗口");

@@ -1,7 +1,7 @@
 {
   "name": "zotero-exitem",
   "type": "module",
-  "version": "0.1.3",
+  "version": "0.2.1",
   "description": "Zotero-Exitem",
   "config": {
     "addonName": "Zotero-Exitem",

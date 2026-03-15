@@ -9,7 +9,6 @@ import {
   getReviewSettings,
   saveReviewSettings,
 } from "./reviewConfig";
-import { refreshReviewManagerIfOpen } from "./reviewManager";
 
 export async function registerPrefsScripts(_window: Window) {
   addon.data.prefs = { window: _window };
@@ -69,7 +68,7 @@ function initPrefsUI(win: Window) {
   const detectionDetail = getEl<HTMLElement>(doc, id("awesome-detail"));
   const saveBtn = getEl<HTMLButtonElement>(doc, id("save-btn"));
   const refreshBtn = getEl<HTMLButtonElement>(doc, id("refresh-detection-btn"));
-  const refreshPromptViewBtn = getEl<HTMLButtonElement>(
+  const savePromptBtn = getEl<HTMLButtonElement>(
     doc,
     id("refresh-prompt-view-btn"),
   );
@@ -115,6 +114,7 @@ function initPrefsUI(win: Window) {
 
   const persistSettings = () => {
     const current = getReviewSettings();
+    const truncationEnabled = enablePDFInputTruncationInput.checked;
     return saveReviewSettings({
       modelConfigMode: "awesomegpt",
       apiConfigMode: "zoterogpt",
@@ -122,23 +122,27 @@ function initPrefsUI(win: Window) {
       usePDFAsInputSource: usePDFAsInputSourceInput.checked,
       usePDFAnnotationsAsContext: usePDFAnnotationsAsContextInput.checked,
       importPDFAnnotationsAsField: importPDFAnnotationsAsFieldInput.checked,
-      enablePDFInputTruncation: enablePDFInputTruncationInput.checked,
-      pdfTextMaxChars: Math.max(
-        1,
-        Math.floor(
-          Number(pdfTextMaxCharsInput.value) ||
-            current.pdfTextMaxChars ||
-            20_000,
-        ),
-      ),
-      pdfAnnotationTextMaxChars: Math.max(
-        1,
-        Math.floor(
-          Number(pdfAnnotationTextMaxCharsInput.value) ||
-            current.pdfAnnotationTextMaxChars ||
-            12_000,
-        ),
-      ),
+      enablePDFInputTruncation: truncationEnabled,
+      ...(truncationEnabled
+        ? {
+            pdfTextMaxChars: Math.max(
+              1,
+              Math.floor(
+                Number(pdfTextMaxCharsInput.value) ||
+                  current.pdfTextMaxChars ||
+                  20_000,
+              ),
+            ),
+            pdfAnnotationTextMaxChars: Math.max(
+              1,
+              Math.floor(
+                Number(pdfAnnotationTextMaxCharsInput.value) ||
+                  current.pdfAnnotationTextMaxChars ||
+                  12_000,
+              ),
+            ),
+          }
+        : {}),
       customPromptTemplate: customPromptInput.value.trim(),
       customFolderSummaryPromptTemplate:
         customFolderSummaryPromptInput.value.trim(),
@@ -154,17 +158,16 @@ function initPrefsUI(win: Window) {
     }
   };
 
-  refreshPromptViewBtn.onclick = async () => {
+  savePromptBtn.onclick = () => {
     try {
-      persistSettings();
-      const refreshed = await refreshReviewManagerIfOpen();
-      if (refreshed) {
-        win.alert("Prompt 已应用，文献记录视图列已刷新");
-      } else {
-        win.alert("Prompt 已应用。请打开“文献综述管理”界面查看最新列配置");
-      }
+      saveReviewSettings({
+        customPromptTemplate: customPromptInput.value.trim(),
+        customFolderSummaryPromptTemplate:
+          customFolderSummaryPromptInput.value.trim(),
+      });
+      win.alert("Prompt 配置已保存");
     } catch (e: any) {
-      win.alert(`刷新失败：${e?.message || e}`);
+      win.alert(`保存 Prompt 配置失败：${e?.message || e}`);
     }
   };
 }

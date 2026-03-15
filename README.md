@@ -1,6 +1,6 @@
 # Zotero-Exitem
 
-[![zotero target version](https://img.shields.io/badge/Zotero-7%20%7C%208-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![zotero target version](https://img.shields.io/badge/Zotero-8-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
 
 Zotero-Exitem is a Zotero plugin for AI-assisted literature extraction, review management, synthesis, and export.
@@ -13,7 +13,7 @@ Zotero-Exitem is a Zotero plugin for AI-assisted literature extraction, review m
 
 ## Prerequisites
 
-- Zotero 7 or Zotero 8
+- Zotero 8
 - Installed and configured `zotero-gpt` plugin:
   - Project: https://github.com/MuiseDestiny/zotero-gpt
   - Setup guide (Chinese): https://zotero-chinese.com/user-guide/plugins/zotero-gpt
@@ -46,21 +46,16 @@ A full flow is: `Preferences setup` -> `Single/Batch extraction` -> `Review Mana
 ### 2. Configure extraction prompt and folder-synthesis prompt
 
 - Edit custom prompts in preferences (for both extraction and folder synthesis).
-- After changing extraction prompt fields, click `Apply Prompt and Refresh Literature View` to sync table columns with your field definitions (beta feature).
-
-![Preferences: custom prompts and refresh columns](./doc/images/首选项-自定义prompt与刷新列字段功能.png)
+- Click `保存 Prompt 配置` to save the current configuration.
+- Prompts now affect AI extraction and folder synthesis output only; they no longer control which columns appear in the literature table.
 
 ### 3. Single-item extraction
 
 - In the Zotero main view, select one item and click `AI提炼文献内容` from the right-click menu.
 - The plugin runs extraction through your configured `zotero-gpt` models.
+- Extraction progress is shown in a single progress window; on success, the record is saved automatically into the `我的记录` folder.
 
 ![Single-item extraction entry](./doc/images/单条文献提取操作.png)
-
-- After extraction, an editable result dialog opens before saving.
-- You can save directly to an existing folder or create a new folder first.
-
-![Single-item extraction result dialog (editable before save)](./doc/images/单条文献提取结果弹窗.png)
 
 ### 4. Batch extraction (up to 5 items per run)
 
@@ -72,13 +67,14 @@ A full flow is: `Preferences setup` -> `Single/Batch extraction` -> `Review Mana
 ### 5. Open Review Manager
 
 - Click the Exitem icon in Zotero's top toolbar to open Review Manager.
+- Review Manager opens as an embedded tab inside the Zotero main window.
 
 ![Open Review Manager](./doc/images/打开文献综述管理页面.png)
 
 ### 6. Review Manager basics
 
 - Left panel: folders. Center: record list. Bottom: content preview.
-- Top toolbar supports refresh, folder operations, record operations, locate item, view raw record, and export.
+- Top toolbar supports refresh, folder operations, record operations, edit record, generate note, and export.
 
 ![Review Manager overview](./doc/images/文献综述管理界面展示.png)
 
@@ -102,16 +98,23 @@ A full flow is: `Preferences setup` -> `Single/Batch extraction` -> `Review Mana
 
 ![Run folder synthesis](./doc/images/合并综述操作.png)
 
-### 10. View and edit raw records (both record types)
+### 10. View and edit records (both record types)
 
-- Select a target record and click `查看原始记录`.
-- You can copy and manually revise content before saving for reuse/export.
+- Select a target record and click `编辑记录`.
+- You can revise extracted fields directly before saving for reuse, export, or note generation.
 
-![Open raw-record editor from manager](./doc/images/查看原始记录并编辑.png)
+![Open record editor from manager](./doc/images/查看原始记录并编辑.png)
 
-![Raw-record editor](./doc/images/原始记录编辑界面.png)
+![Record editor](./doc/images/原始记录编辑界面.png)
 
-### 11. Export results
+### 11. Generate native Zotero notes
+
+- In the `文献记录` view, select one or more records and click `生成笔记`.
+- The plugin creates native child notes under the corresponding Zotero items instead of generating separate files.
+- Note content is built from the current Exitem record and written into Zotero after being organized into a Markdown-friendly structure.
+- These notes are saved as native Zotero data, so they remain available in Zotero's own note system.
+
+### 12. Export results
 
 - Click `导出表格` in Review Manager to export CSV under the current view/filter scope.
 
@@ -119,8 +122,8 @@ A full flow is: `Preferences setup` -> `Single/Batch extraction` -> `Review Mana
 
 - Trigger extraction from Zotero item context menu: `AI提炼文献内容`
 - Single-item extraction:
-  - opens an editable result dialog before saving
-  - supports selecting target folder or creating a new folder directly
+  - uses a single progress window with live stage updates
+  - auto-saves successful results into the `我的记录` folder
 - Batch extraction:
   - supports up to 5 items per run
   - auto-saves successful results to a folder and opens Review Manager
@@ -132,21 +135,23 @@ A full flow is: `Preferences setup` -> `Single/Batch extraction` -> `Review Mana
 - Prompt system:
   - custom literature extraction prompt
   - custom folder-synthesis prompt (`合并综述`)
-  - preferences action to apply prompt and refresh literature-view columns
+  - preferences action to save prompt settings
 - Review Manager UI:
-  - entry from toolbar button, with tab-first opening (dialog fallback)
+  - entry from toolbar button, opening as an embedded Zotero tab
   - dual view: `文献记录` and `合并综述`
   - fixed view switch controls and record detail preview panel
-  - dynamic literature table columns parsed from extraction prompt field keys
+  - fixed literature-table columns for extracted fields
 - Folder and record management:
   - create/delete/merge folders
   - add/remove record-folder membership (supports multi-folder membership)
-  - search, sort, pagination, multi-select, and bulk delete
-  - jump to original Zotero item from literature records
+  - search, sort, multi-select, and bulk delete
+  - title column links back to the original Zotero item
 - Synthesis and export:
   - folder-level synthesis (`合并综述`) with progress feedback
   - persisted summary records with source tracing (`sourceRecordIDs`, `sourceZoteroItemIDs`)
-  - raw AI response viewer/editor
+  - batch creation of native Zotero child notes from `文献记录`
+  - note content generated from Exitem records and stored natively under Zotero items
+  - record viewer/editor
   - CSV export for current view/filter scope
 - Storage:
   - independent JSON storage file in Zotero data directory: `exitem-review-store.json`

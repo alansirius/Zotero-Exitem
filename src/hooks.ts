@@ -12,18 +12,43 @@ import { getString, initLocale } from "./utils/locale";
 let prefsRegistered = false;
 
 async function onStartup() {
-  await Promise.all([
-    Zotero.initializationPromise,
-    Zotero.unlockPromise,
-    Zotero.uiReadyPromise,
-  ]);
+  try {
+    await Promise.all(
+      [
+        Zotero.initializationPromise,
+        (Zotero as any).unlockPromise,
+        (Zotero as any).uiReadyPromise,
+      ].filter(Boolean),
+    );
+  } catch (e) {
+    ztoolkit.log("Startup wait promises failed", e);
+  }
 
-  initLocale();
-  registerPreferencePane();
-  await initializeReviewFeature();
+  try {
+    initLocale();
+  } catch (e) {
+    ztoolkit.log("Locale init failed; continuing startup", e);
+  }
+  try {
+    registerPreferencePane();
+  } catch (e) {
+    ztoolkit.log("Preference pane registration failed", e);
+  }
+  try {
+    await initializeReviewFeature();
+  } catch (e) {
+    ztoolkit.log("Review feature init failed; continuing startup", e);
+  }
 
+  const mainWindows = getMainWindowsCompat();
   await Promise.all(
-    Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),
+    mainWindows.map(async (win) => {
+      try {
+        await onMainWindowLoad(win);
+      } catch (e) {
+        ztoolkit.log("Main window load hook failed", e);
+      }
+    }),
   );
 
   addon.data.initialized = true;
@@ -83,13 +108,55 @@ function onDialogEvents(_type: string) {
 
 function registerPreferencePane() {
   if (prefsRegistered) return;
-  Zotero.PreferencePanes.register({
+  const preferencePanes = (Zotero as any).PreferencePanes;
+  if (typeof preferencePanes?.register !== "function") {
+    ztoolkit.log("PreferencePanes.register is unavailable in this Zotero");
+    return;
+  }
+  preferencePanes.register({
     pluginID: addon.data.config.addonID,
     src: rootURI + "content/preferences.xhtml",
     label: getString("prefs-title"),
     image: `chrome://${addon.data.config.addonRef}/content/icons/favicon.png`,
   });
   prefsRegistered = true;
+}
+
+function getMainWindowsCompat(): _ZoteroTypes.MainWindow[] {
+  const getMainWindows = (Zotero as any)?.getMainWindows;
+  if (typeof getMainWindows === "function") {
+    const wins = getMainWindows.call(Zotero);
+    if (Array.isArray(wins)) {
+      return wins as _ZoteroTypes.MainWindow[];
+    }
+  }
+
+  const getMainWindow = (Zotero as any)?.getMainWindow;
+  if (typeof getMainWindow === "function") {
+    const win = getMainWindow.call(Zotero);
+    if (win) return [win as _ZoteroTypes.MainWindow];
+  }
+
+  try {
+    const wm = (globalThis as any)?.Services?.wm;
+    if (wm?.getEnumerator) {
+      const wins: _ZoteroTypes.MainWindow[] = [];
+      for (const type of ["zotero:main", "navigator:browser"]) {
+        const enumerator = wm.getEnumerator(type);
+        while (enumerator?.hasMoreElements?.()) {
+          const win = enumerator.getNext();
+          if ((win as any)?.document) {
+            wins.push(win as _ZoteroTypes.MainWindow);
+          }
+        }
+        if (wins.length) return wins;
+      }
+    }
+  } catch (e) {
+    ztoolkit.log("Window mediator fallback failed", e);
+  }
+
+  return [];
 }
 
 export default {

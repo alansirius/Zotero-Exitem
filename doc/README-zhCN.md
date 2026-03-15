@@ -1,6 +1,6 @@
 # Zotero-Exitem
 
-[![zotero target version](https://img.shields.io/badge/Zotero-7%20%7C%208-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![zotero target version](https://img.shields.io/badge/Zotero-8-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
 
 Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、合并综述与导出插件。
@@ -13,7 +13,7 @@ Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、
 
 ## 预装条件
 
-- Zotero 7 或 Zotero 8
+- Zotero 8
 - 已安装并完成 `zotero-gpt` 配置：
   - 项目地址：https://github.com/MuiseDestiny/zotero-gpt
   - 中文配置说明：https://zotero-chinese.com/user-guide/plugins/zotero-gpt
@@ -46,21 +46,16 @@ Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、
 ### 2. 配置提炼 Prompt 与合并综述 Prompt
 
 - 在首选项中编辑自定义 Prompt（提炼与合并综述都支持）。
-- 修改提炼 Prompt 字段后，点击 `应用 Prompt 并刷新文献视图`，让“文献记录”表格列与字段定义同步（beta版功能）。
-
-![首选项：自定义 Prompt 与刷新列字段](./images/首选项-自定义prompt与刷新列字段功能.png)
+- 点击 `保存 Prompt 配置` 保存当前设置。
+- Prompt 仅影响 AI 提炼与合并综述的输出内容，不再控制“文献记录”表格列显示。
 
 ### 3. 单条文献提炼
 
 - 在 Zotero 主界面中选中一条文献，右键菜单点击 `AI提炼文献内容`。
 - 插件会调用已配置的 `zotero-gpt` 模型执行提炼。
+- 提炼过程使用单个进度窗实时显示阶段；成功后自动保存到 `我的记录` 文件夹。
 
 ![单条文献提炼操作入口](./images/单条文献提取操作.png)
-
-- 提炼后会弹出结果窗口，可先人工修改再保存。
-- 可直接选择目标文件夹，也可先新建文件夹再保存。
-
-![单条文献提炼结果弹窗（可编辑后保存）](./images/单条文献提取结果弹窗.png)
 
 ### 4. 批量文献提炼（单次最多 5 篇）
 
@@ -72,19 +67,20 @@ Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、
 ### 5. 打开文献综述管理页面
 
 - 点击 Zotero 顶部工具栏中的 Exitem 图标进入管理页。
+- 管理页会以内嵌标签页的形式在 Zotero 主界面中打开。
 
 ![打开文献综述管理页面](./images/打开文献综述管理页面.png)
 
 ### 6. 熟悉管理页：文献记录视图与基础操作
 
 - 左侧是分类文件夹，中间是记录列表，底部是内容预览。
-- 顶部工具栏支持刷新、文件夹管理、记录增删、定位条目、查看原始记录、导出表格等操作。
+- 顶部工具栏支持刷新、文件夹管理、记录增删、编辑记录、生成笔记、导出表格等操作。
 
 ![文献综述管理界面总览](./images/文献综述管理界面展示.png)
 
 ### 7. 切换“文献记录 / 合并综述”视图
 
-- 在管理页中通过切换按钮查看原始提炼记录或合并综述记录。
+- 在管理页中通过切换按钮查看文献记录或合并综述记录。
 
 ![切换文献记录与合并综述视图](./images/切换视图.png)
 
@@ -102,16 +98,23 @@ Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、
 
 ![按文件夹执行合并综述](./images/合并综述操作.png)
 
-### 10. 查看并编辑原始记录（文献记录/合并综述均可）
+### 10. 查看并编辑记录（文献记录/合并综述均可）
 
-- 在列表勾选目标记录，点击 `查看原始记录`。
-- 可复制、手动修订内容后保存，便于后续复用与导出。
+- 在列表勾选目标记录，点击 `编辑记录`。
+- 可按字段直接修订提炼内容后保存，便于后续复用、导出与生成原生笔记。
 
-![从管理页打开原始记录编辑窗口](./images/查看原始记录并编辑.png)
+![从管理页打开记录编辑窗口](./images/查看原始记录并编辑.png)
 
-![原始记录编辑界面](./images/原始记录编辑界面.png)
+![记录编辑界面](./images/原始记录编辑界面.png)
 
-### 11. 导出结果
+### 11. 生成 Zotero 原生笔记
+
+- 在 `文献记录` 视图中勾选一条或多条记录，点击 `生成笔记`。
+- 插件会在每条记录对应的 Zotero 条目下创建原生子笔记，不会额外生成独立文件。
+- 笔记内容会基于当前 Exitem 记录生成，自动整理为适合阅读与继续编辑的 Markdown 结构后写入 Zotero。
+- 生成成功后，这些笔记会直接作为 Zotero 原生数据持久化保存，可继续在 Zotero 笔记体系中使用。
+
+### 12. 导出结果
 
 - 在管理页中按当前视图与筛选条件点击 `导出表格`，可导出 CSV 用于二次分析或写作整理。
 
@@ -119,8 +122,8 @@ Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、
 
 - 在 Zotero 条目右键菜单触发 `AI提炼文献内容`
 - 单篇提炼：
-  - 提炼后弹出可编辑结果窗口再保存
-  - 支持直接选择目标文件夹或在窗口内新建文件夹
+  - 使用单个进度窗实时显示提炼阶段
+  - 成功后自动保存到 `我的记录` 文件夹
 - 批量提炼：
   - 单次最多 5 篇
   - 成功结果自动保存到目标文件夹，并打开文献综述管理界面
@@ -132,21 +135,23 @@ Zotero-Exitem 是一款用于 Zotero 的 AI 文献信息提炼、综述管理、
 - Prompt 系统：
   - 支持自定义提炼 Prompt
   - 支持自定义合并综述 Prompt（`合并综述`）
-  - 首选项支持一键应用 Prompt 并刷新文献记录视图列
+  - 首选项支持 `保存 Prompt 配置`
 - 文献综述管理界面：
-  - 工具栏按钮入口，优先以标签页打开（失败时回退弹窗）
+  - 工具栏按钮入口，以 Zotero 内嵌标签页打开
   - 双视图：`文献记录` 与 `合并综述`
   - 固定视图切换控件和记录详情预览面板
-  - `文献记录` 视图列可根据提炼 Prompt 字段动态解析
+  - `文献记录` 视图使用固定字段列展示提炼结果
 - 文件夹与记录管理：
   - 新建/删除/合并文件夹
   - 记录加入/移出文件夹（支持同一记录归属多个文件夹）
-  - 搜索、排序、分页、多选与批量删除
-  - 从文献记录定位回 Zotero 原条目
+  - 搜索、排序、多选与批量删除
+  - 标题列支持跳转回 Zotero 原条目
 - 合并综述与导出：
   - 按文件夹执行“合并综述”，并提供进度反馈
   - 合并综述记录保留来源追踪：`sourceRecordIDs`、`sourceZoteroItemIDs`
-  - 支持原始 AI 响应查看与编辑
+  - 支持在 `文献记录` 视图下批量创建 Zotero 原生子笔记
+  - 笔记内容基于当前 Exitem 记录生成，并原生持久化保存到 Zotero 条目下
+  - 支持记录内容查看与编辑
   - 按当前视图与筛选范围导出 CSV
 - 存储：
   - Zotero 数据目录独立 JSON 文件：`exitem-review-store.json`

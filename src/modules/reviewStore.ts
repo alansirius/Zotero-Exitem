@@ -9,6 +9,7 @@ import {
 
 const DEFAULT_FOLDER_NAME = "未分类";
 const PROTECTED_FOLDER_NAMES = new Set([DEFAULT_FOLDER_NAME]);
+const DEFAULT_COEXIST_FOLDER_NAMES = new Set(["我的记录"]);
 const STORE_FILE_NAME = `${config.addonRef}-review-store.json`;
 const STORE_SCHEMA_VERSION = 2;
 
@@ -148,6 +149,50 @@ export async function createReviewFolder(
       updatedAt: timestamp,
     };
     store.folders.push(folder);
+    markStoreUpdated(store);
+    await saveStoreData(store);
+    return mapFolderRow(folder);
+  });
+}
+
+export async function renameReviewFolder(
+  folderID: number,
+  nextName: string,
+): Promise<ReviewFolderRow> {
+  return withStoreOp(async () => {
+    const store = await loadStoreData();
+    ensureStoreIntegrity(store);
+    const id = Number(folderID);
+    const folder = findFolderByID(store, id);
+    if (!folder) {
+      throw new Error("文件夹不存在");
+    }
+    if (PROTECTED_FOLDER_NAMES.has(folder.name)) {
+      throw new Error(`系统文件夹不可重命名：${folder.name}`);
+    }
+
+    const normalized = normalizeFolderName(nextName);
+    if (!normalized) {
+      throw new Error("文件夹名称不能为空");
+    }
+
+    const existing = findFolderByName(store, normalized);
+    if (existing && existing.id !== folder.id) {
+      throw new Error(`已存在同名文件夹：${existing.name}`);
+    }
+
+    if (folder.name === normalized) {
+      return mapFolderRow(folder);
+    }
+
+    const timestamp = nowISO();
+    folder.name = normalized;
+    folder.updatedAt = timestamp;
+    touchRecords(
+      store,
+      getRecordIDsByFolderIDsInternal(store, [folder.id]),
+      timestamp,
+    );
     markStoreUpdated(store);
     await saveStoreData(store);
     return mapFolderRow(folder);
@@ -580,6 +625,54 @@ export async function updateReviewRecordRawResponse(
   });
 }
 
+export async function updateLiteratureReviewRecord(
+  recordID: number,
+  input: {
+    title: string;
+    authors: string;
+    journal: string;
+    publicationDate: string;
+    abstractText: string;
+    pdfAnnotationNotesText: string;
+    researchBackground: string;
+    literatureReview: string;
+    researchMethods: string;
+    researchConclusions: string;
+    keyFindings: string[];
+    classificationTags: string[];
+  },
+): Promise<ReviewRecordRow | null> {
+  return withStoreOp(async () => {
+    const store = await loadStoreData();
+    ensureStoreIntegrity(store);
+    const record = store.records.find((row) => row.id === Number(recordID));
+    if (!record) return null;
+    if (record.recordType === "folderSummary") {
+      throw new Error("合并综述记录不支持此编辑方式");
+    }
+
+    record.title = String(input.title || "").trim();
+    record.authors = String(input.authors || "").trim();
+    record.journal = String(input.journal || "").trim();
+    record.publicationDate = String(input.publicationDate || "").trim();
+    record.abstractText = String(input.abstractText || "").trim();
+    record.pdfAnnotationNotesText = String(
+      input.pdfAnnotationNotesText || "",
+    ).trim();
+    record.researchBackground = String(input.researchBackground || "").trim();
+    record.literatureReview = String(input.literatureReview || "").trim();
+    record.researchMethods = String(input.researchMethods || "").trim();
+    record.researchConclusions = String(input.researchConclusions || "").trim();
+    record.keyFindings = normalizeStringArray(input.keyFindings);
+    record.classificationTags = normalizeStringArray(input.classificationTags);
+    record.rawAIResponse = buildLiteratureRawAIResponse(record);
+    record.updatedAt = nowISO();
+    markStoreUpdated(store);
+    await saveStoreData(store);
+    return mapRecordWithFolders(store, record, { includeRawAIResponse: true });
+  });
+}
+
 export async function exportReviewRecordsAsCSV(
   filters: ReviewListFilters = {},
 ): Promise<string> {
@@ -895,7 +988,12 @@ function normalizeRecordFolderMemberships(
     const hasNonDefault = links.some(
       (link) => link.folderID !== defaultFolder.id,
     );
-    if (hasDefault && hasNonDefault) {
+    const keepDefaultCoexist = links.some((link) => {
+      if (link.folderID === defaultFolder.id) return false;
+      const folder = findFolderByID(store, link.folderID);
+      return !!folder && DEFAULT_COEXIST_FOLDER_NAMES.has(folder.name);
+    });
+    if (hasDefault && hasNonDefault && !keepDefaultCoexist) {
       const before = store.recordFolderLinks.length;
       store.recordFolderLinks = store.recordFolderLinks.filter(
         (link) =>
@@ -1245,6 +1343,57 @@ function normalizeStringArray(value: unknown) {
     .map((v) => String(v).trim())
     .filter(Boolean)
     .slice(0, 200);
+}
+
+function buildLiteratureRawAIResponse(
+  record: Pick<
+    JSONStoreRecord,
+    | "title"
+    | "authors"
+    | "journal"
+    | "publicationDate"
+    | "abstractText"
+    | "pdfAnnotationNotesText"
+    | "researchBackground"
+    | "literatureReview"
+    | "researchMethods"
+    | "researchConclusions"
+    | "keyFindings"
+    | "classificationTags"
+    | "rawAIResponse"
+  >,
+) {
+  const payload = parseJSONObject(record.rawAIResponse);
+  delete payload.abstractText;
+  payload.title = record.title;
+  payload.authors = record.authors;
+  payload.journal = record.journal;
+  payload.publicationDate = record.publicationDate;
+  payload.abstract = record.abstractText;
+  payload.researchBackground = record.researchBackground;
+  payload.literatureReview = record.literatureReview;
+  payload.researchMethods = record.researchMethods;
+  payload.researchConclusions = record.researchConclusions;
+  payload.keyFindings = [...record.keyFindings];
+  payload.classificationTags = [...record.classificationTags];
+  if (String(record.pdfAnnotationNotesText || "").trim()) {
+    payload.pdfAnnotationNotesText = record.pdfAnnotationNotesText;
+  } else {
+    delete payload.pdfAnnotationNotesText;
+  }
+  return JSON.stringify(payload, null, 2);
+}
+
+function parseJSONObject(text: string) {
+  try {
+    const parsed = JSON.parse(String(text || ""));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ...(parsed as Record<string, unknown>) };
+    }
+  } catch {
+    // ignore
+  }
+  return {} as Record<string, unknown>;
 }
 
 function normalizeRecordType(value: unknown): ReviewRecordType {

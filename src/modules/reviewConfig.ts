@@ -1,4 +1,4 @@
-import { getPref, setPref } from "../utils/prefs";
+import { clearPref, getPref, setPref } from "../utils/prefs";
 import {
   AwesomeGPTDetection,
   ReviewSettings,
@@ -25,6 +25,13 @@ const DEFAULTS: ReviewSettings = {
   customPromptTemplate: "",
   customFolderSummaryPromptTemplate: "",
 };
+
+const AWESOME_GPT_DETECTION_CACHE_TTL_MS = 15_000;
+
+let awesomeGPTDetectionCache: {
+  expiresAt: number;
+  result: AwesomeGPTDetection;
+} | null = null;
 
 export function getReviewSettings(): ReviewSettings {
   const snapshot = getZoteroGPTPrefsSnapshot();
@@ -110,15 +117,21 @@ export function saveReviewSettings(input: Partial<ReviewSettings>) {
     "importPDFAnnotationsAsField",
     Boolean(next.importPDFAnnotationsAsField),
   );
-  setPref("enablePDFInputTruncation", Boolean(next.enablePDFInputTruncation));
-  setPref(
-    "pdfTextMaxChars",
-    Math.max(1, normalizeInt(next.pdfTextMaxChars, 20_000)),
-  );
-  setPref(
-    "pdfAnnotationTextMaxChars",
-    Math.max(1, normalizeInt(next.pdfAnnotationTextMaxChars, 12_000)),
-  );
+  const truncationEnabled = Boolean(next.enablePDFInputTruncation);
+  setPref("enablePDFInputTruncation", truncationEnabled);
+  if (truncationEnabled) {
+    setPref(
+      "pdfTextMaxChars",
+      Math.max(1, normalizeInt(next.pdfTextMaxChars, 20_000)),
+    );
+    setPref(
+      "pdfAnnotationTextMaxChars",
+      Math.max(1, normalizeInt(next.pdfAnnotationTextMaxChars, 12_000)),
+    );
+  } else {
+    clearPref("pdfTextMaxChars");
+    clearPref("pdfAnnotationTextMaxChars");
+  }
   setPref("customPromptTemplate", next.customPromptTemplate);
   setPref(
     "customFolderSummaryPromptTemplate",
@@ -271,14 +284,26 @@ export async function detectAwesomeGPTAsync(): Promise<AwesomeGPTDetection> {
     return runtime;
   }
 
+  if (
+    awesomeGPTDetectionCache &&
+    awesomeGPTDetectionCache.expiresAt > Date.now()
+  ) {
+    return awesomeGPTDetectionCache.result;
+  }
+
   const addonManager = await getAddonManagerSafe();
   if (!addonManager) {
-    return {
+    const result = {
       ...runtime,
       detail:
         runtime.detail ||
         "当前环境无法访问 AddonManager，无法进一步确认是否已安装兼容 GPT 插件",
     };
+    awesomeGPTDetectionCache = {
+      expiresAt: Date.now() + AWESOME_GPT_DETECTION_CACHE_TTL_MS,
+      result,
+    };
+    return result;
   }
 
   try {
@@ -292,13 +317,18 @@ export async function detectAwesomeGPTAsync(): Promise<AwesomeGPTDetection> {
     });
 
     if (!match) {
-      return {
+      const result = {
         ...runtime,
         detail: "在已安装扩展列表中未发现兼容 GPT 插件",
       };
+      awesomeGPTDetectionCache = {
+        expiresAt: Date.now() + AWESOME_GPT_DETECTION_CACHE_TTL_MS,
+        result,
+      };
+      return result;
     }
 
-    return {
+    const result = {
       installed: true,
       source: "AddonManager",
       callable: false,
@@ -308,12 +338,22 @@ export async function detectAwesomeGPTAsync(): Promise<AwesomeGPTDetection> {
       obstacle:
         "已安装但未检测到可调用接口，请确认 Zotero GPT 版本与运行时状态。",
     };
+    awesomeGPTDetectionCache = {
+      expiresAt: Date.now() + AWESOME_GPT_DETECTION_CACHE_TTL_MS,
+      result,
+    };
+    return result;
   } catch (e: any) {
-    return {
+    const result = {
       ...runtime,
       detail: `读取已安装插件列表失败：${String(e?.message || e)}`,
       obstacle: "无法通过 AddonManager 确认 GPT 插件安装状态",
     };
+    awesomeGPTDetectionCache = {
+      expiresAt: Date.now() + AWESOME_GPT_DETECTION_CACHE_TTL_MS,
+      result,
+    };
+    return result;
   }
 }
 
@@ -377,7 +417,20 @@ async function getAddonManagerSafe(): Promise<any | null> {
 
 function getPrimaryMainWindowSafe() {
   try {
-    return (Zotero.getMainWindows?.()[0] as any) || null;
+    const getMainWindows = (Zotero as any)?.getMainWindows;
+    if (typeof getMainWindows === "function") {
+      const wins = getMainWindows.call(Zotero);
+      if (Array.isArray(wins) && wins.length) return wins[0] as any;
+    }
+    const getMainWindow = (Zotero as any)?.getMainWindow;
+    if (typeof getMainWindow === "function") {
+      return (getMainWindow.call(Zotero) as any) || null;
+    }
+    const wm = (globalThis as any)?.Services?.wm;
+    if (wm?.getMostRecentWindow) {
+      return (wm.getMostRecentWindow("zotero:main") as any) || null;
+    }
+    return null;
   } catch {
     return null;
   }

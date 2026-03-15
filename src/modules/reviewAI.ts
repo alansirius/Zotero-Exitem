@@ -15,6 +15,7 @@ const GPT_PLUGIN_TIMEOUT_FLOOR_SECONDS = 600;
 const EMBEDDING_MAX_CHUNKS = 12;
 const EMBEDDING_CHUNK_CHARS = 1200;
 const EMBEDDING_TOP_K = 4;
+const DIRECT_PDF_PROMPT_MAX_CHARS = 30_000;
 
 export type ReviewPromptFieldKey =
   | "title"
@@ -53,7 +54,7 @@ export const DEFAULT_REVIEW_PROMPT_TEMPLATE = [
   "你是一名严谨的学术研究助理。请基于下方单篇文献信息输出结构化提炼结果。",
   "硬性要求：",
   "1. 仅返回 JSON 对象本体，不要 Markdown、不要代码块、不要额外说明文本。",
-  "2. 使用中文输出（title/authors/journal/publicationDate 可保留原文）。",
+  "2. 提炼结果默认使用中文输出；除 title/authors/journal/publicationDate 外，其余字段必须使用中文，不得返回英文段落。",
   "3. 必须包含字段：title, authors, journal, publicationDate, abstract, researchBackground, literatureReview, researchMethods, researchConclusions, keyFindings, classificationTags。",
   "4. keyFindings 与 classificationTags 必须是字符串数组，不得返回对象数组。",
   "5. 严格依据提供材料，不得编造；信息不足时写“信息不足：<缺失点>”。",
@@ -99,6 +100,7 @@ interface ReviewItemSource {
   zoteroTags: string[];
   content: string;
   pdfText: string;
+  pdfPromptMode: "none" | "fulltext" | "embedding";
   pdfAttachmentLabel: string;
   pdfAnnotationText: string;
   importPDFAnnotationsAsField: boolean;
@@ -122,6 +124,13 @@ export interface FolderReviewSummaryResult {
 
 type ReviewProgressReporter = (progress: number, stage: string) => void;
 
+type GPTBridgeCall = {
+  key: string;
+  call: () => Promise<any>;
+};
+
+let preferredGPTBridgeKey: string | null = null;
+
 class ReviewUserError extends Error {
   userMessage: string;
 
@@ -137,8 +146,8 @@ export async function extractLiteratureReview(
   options: ReviewExtractionOptions = {},
 ) {
   const report = createProgressReporter(options.onProgress);
-  report(2, "准备提炼");
-  report(8, "读取文献信息");
+  report(2, "准备提炼任务");
+  report(8, "加载文献信息");
 
   const settings = getReviewSettings();
   const source = await buildItemSource(item, settings, report);
@@ -152,7 +161,7 @@ export async function extractLiteratureReview(
   }
 
   try {
-    report(42, "检查 GPT 插件");
+    report(42, "检查 GPT 插件状态");
     return await extractByCompatibleGPTPlugin(
       item,
       source,
@@ -264,25 +273,30 @@ async function buildItemSource(
   settings: ReviewSettings,
   report?: ReviewProgressReporter,
 ): Promise<ReviewItemSource> {
-  report?.(10, "读取元数据");
+  report?.(10, "读取标题、作者、期刊等元数据");
   const title = safeField(item, "title") || item.getDisplayTitle() || "";
   const journal = safeField(item, "publicationTitle");
   const date = safeField(item, "date");
   const abstractText = safeField(item, "abstractNote");
   const authors = joinCreators(item);
   const zoteroTags = getItemTags(item);
-  report?.(16, "读取笔记");
+  report?.(16, "读取 Zotero 笔记与标签");
   const noteText = getNoteText(item);
   const shouldReadPDFAnnotations =
     Boolean(settings.usePDFAnnotationsAsContext) ||
     Boolean(settings.importPDFAnnotationsAsField);
+  const attachments =
+    shouldReadPDFAnnotations || settings.usePDFAsInputSource
+      ? await getCandidateAttachments(item)
+      : [];
   const pdfAnnotationSource = shouldReadPDFAnnotations
-    ? await getPDFAnnotationSource(item, settings, report)
+    ? await getPDFAnnotationSource(attachments, settings, report)
     : { text: "", label: "" };
   const pdfSource = settings.usePDFAsInputSource
-    ? await getPDFTextSource(item, settings, report)
+    ? await getPDFTextSource(attachments, settings, report)
     : { text: "", label: "" };
-  report?.(30, "整理文献内容");
+  const pdfPromptMode = pickPDFPromptMode(pdfSource.text);
+  report?.(30, "整理元数据、笔记与 PDF 内容");
 
   const content = [
     `标题: ${title}`,
@@ -297,7 +311,7 @@ async function buildItemSource(
     settings.usePDFAnnotationsAsContext && pdfAnnotationSource.text
       ? `\nPDF批注与批注下笔记（${pdfAnnotationSource.label || "附件"}）：\n${pdfAnnotationSource.text}`
       : "",
-    pdfSource.text
+    pdfPromptMode === "fulltext" && pdfSource.text
       ? `\nPDF原文（${pdfSource.label || "附件"}）：\n${pdfSource.text}`
       : "",
   ]
@@ -313,6 +327,7 @@ async function buildItemSource(
     zoteroTags,
     content,
     pdfText: pdfSource.text,
+    pdfPromptMode,
     pdfAttachmentLabel: pdfSource.label,
     pdfAnnotationText: pdfAnnotationSource.text,
     importPDFAnnotationsAsField: Boolean(settings.importPDFAnnotationsAsField),
@@ -341,13 +356,13 @@ async function extractByCompatibleGPTPlugin(
         "检测到 GPT 插件已安装，但未找到可调用接口，请先初始化 Zotero GPT 界面后重试",
     );
   }
-  report?.(56, "准备 GPT 插件提炼请求");
+  report?.(56, "生成提炼请求");
   const bridgeSourceContent = await enrichSourceContentWithPDFEmbeddings(
     source,
     timeoutSeconds,
     report,
   );
-  report?.(74, "等待 GPT 插件响应");
+  report?.(74, "等待 GPT 模型响应");
   const awesomeResult = await tryCallAwesomeGPT(
     item,
     bridgeSourceContent,
@@ -360,13 +375,13 @@ async function extractByCompatibleGPTPlugin(
       "已检测到 GPT 插件，但当前未找到可调用接口，请先初始化 Zotero GPT 界面后重试",
     );
   }
-  report?.(88, "解析 GPT 插件返回内容");
+  report?.(88, "解析模型返回结果");
   const draft = normalizeDraft(item, awesomeResult.text, {
     provider: "awesomegpt",
     model: awesomeResult.model || "awesomegpt",
     source,
   });
-  report?.(96, "整理提炼结果");
+  report?.(96, "整理并校验提炼结果");
   return draft;
 }
 
@@ -426,61 +441,47 @@ async function tryCallAwesomeGPT(
     prompt,
     sourceContent,
   };
-  const mainWin = (Zotero.getMainWindows?.()[0] as any) || null;
-  const bridgeCalls: Array<() => Promise<any>> = [
-    async () => {
-      const fn = (Zotero as any)?.AwesomeGPT?.extractLiteratureReview;
-      if (typeof fn !== "function") return null;
-      return fn(requestPayload);
-    },
-    async () => {
-      const fn = (Zotero as any)?.AwesomeGPT?.extract;
-      if (typeof fn !== "function") return null;
-      return fn(requestPayload);
-    },
-    async () => {
-      const fn = (Zotero as any)?.GPT?.extract;
-      if (typeof fn !== "function") return null;
-      return fn(requestPayload);
-    },
-    async () => {
-      const fn = (globalThis as any)?.AwesomeGPT?.extract;
-      if (typeof fn !== "function") return null;
-      return fn(requestPayload);
-    },
-    async () => {
-      const meet = (mainWin as any)?.Meet;
-      const fn = meet?.OpenAI?.getGPTResponse;
-      if (typeof fn !== "function") return null;
-      const text = await fn.call(meet.OpenAI, requestPayload.prompt);
-      return {
-        text,
-        model:
-          ((Zotero as any)?.Prefs?.get?.(
-            "extensions.zotero.zoterogpt.model",
-          ) as string | undefined) || "zotero-gpt",
-      };
-    },
-  ];
+  const mainWin = getPrimaryMainWindowCompat() as any;
+  const bridgeCalls = getGPTBridgeCalls(requestPayload, mainWin);
+  const orderedBridgeCalls =
+    preferredGPTBridgeKey == null
+      ? bridgeCalls
+      : [
+          ...bridgeCalls.filter((candidate) => {
+            return candidate.key === preferredGPTBridgeKey;
+          }),
+          ...bridgeCalls.filter((candidate) => {
+            return candidate.key !== preferredGPTBridgeKey;
+          }),
+        ];
 
   let lastError: unknown = null;
-  for (const call of bridgeCalls) {
+  for (const candidate of orderedBridgeCalls) {
     try {
       const result = await withPromiseTimeout(
-        call(),
+        candidate.call(),
         timeoutSeconds * 1000,
         new ReviewUserError(
           "GPT plugin bridge timeout",
           `GPT 插件响应超时（>${timeoutSeconds}秒），请重试`,
         ),
       );
-      if (!result) continue;
+      if (!result) {
+        if (candidate.key === preferredGPTBridgeKey) {
+          preferredGPTBridgeKey = null;
+        }
+        continue;
+      }
+      preferredGPTBridgeKey = candidate.key;
       if (typeof result === "string") return { text: result };
       if (typeof result?.text === "string")
         return { text: result.text, model: result.model };
       if (typeof result?.content === "string")
         return { text: result.content, model: result.model };
     } catch (e) {
+      if (candidate.key === preferredGPTBridgeKey) {
+        preferredGPTBridgeKey = null;
+      }
       lastError = e;
       // Try next candidate
     }
@@ -489,6 +490,66 @@ async function tryCallAwesomeGPT(
     throw lastError;
   }
   return null;
+}
+
+function getGPTBridgeCalls(
+  requestPayload: {
+    item: Zotero.Item | null;
+    prompt: string;
+    sourceContent: string;
+  },
+  mainWin: any,
+): GPTBridgeCall[] {
+  return [
+    {
+      key: "zotero.awesomegpt.extractLiteratureReview",
+      call: async () => {
+        const fn = (Zotero as any)?.AwesomeGPT?.extractLiteratureReview;
+        if (typeof fn !== "function") return null;
+        return fn(requestPayload);
+      },
+    },
+    {
+      key: "zotero.awesomegpt.extract",
+      call: async () => {
+        const fn = (Zotero as any)?.AwesomeGPT?.extract;
+        if (typeof fn !== "function") return null;
+        return fn(requestPayload);
+      },
+    },
+    {
+      key: "zotero.gpt.extract",
+      call: async () => {
+        const fn = (Zotero as any)?.GPT?.extract;
+        if (typeof fn !== "function") return null;
+        return fn(requestPayload);
+      },
+    },
+    {
+      key: "window.awesomegpt.extract",
+      call: async () => {
+        const fn = (globalThis as any)?.AwesomeGPT?.extract;
+        if (typeof fn !== "function") return null;
+        return fn(requestPayload);
+      },
+    },
+    {
+      key: "meet.openapi.getGPTResponse",
+      call: async () => {
+        const meet = (mainWin as any)?.Meet;
+        const fn = meet?.OpenAI?.getGPTResponse;
+        if (typeof fn !== "function") return null;
+        const text = await fn.call(meet.OpenAI, requestPayload.prompt);
+        return {
+          text,
+          model:
+            ((Zotero as any)?.Prefs?.get?.(
+              "extensions.zotero.zoterogpt.model",
+            ) as string | undefined) || "zotero-gpt",
+        };
+      },
+    },
+  ];
 }
 
 function getCompatibleGPTTimeoutSeconds(timeoutSeconds: number) {
@@ -501,29 +562,47 @@ async function enrichSourceContentWithPDFEmbeddings(
   timeoutSeconds: number,
   report?: ReviewProgressReporter,
 ) {
-  if (!source.pdfText) {
+  if (source.pdfPromptMode !== "embedding" || !source.pdfText) {
     return source.content;
   }
 
-  report?.(60, "分析 PDF 重点片段");
+  report?.(60, "分析长 PDF 重点片段");
   const embeddingContext = await tryBuildPDFEmbeddingContext(
     source,
     timeoutSeconds,
     report,
   );
   if (!embeddingContext) {
-    report?.(68, "未获得 PDF 语义片段，继续提炼");
-    return source.content;
+    report?.(68, "未获得相关片段，跳过长 PDF 附加内容");
+    return mergePDFEmbeddingContext(source.content, "");
   }
 
+  report?.(70, "合并 PDF 重点片段");
+  return mergePDFEmbeddingContext(source.content, embeddingContext);
+}
+
+export function pickPDFPromptMode(
+  pdfText: string,
+): ReviewItemSource["pdfPromptMode"] {
+  const length = String(pdfText || "").trim().length;
+  if (!length) return "none";
+  return length <= DIRECT_PDF_PROMPT_MAX_CHARS ? "fulltext" : "embedding";
+}
+
+export function mergePDFEmbeddingContext(
+  baseContent: string,
+  embeddingContext: string,
+) {
+  const normalizedContext = String(embeddingContext || "").trim();
+  if (!normalizedContext) {
+    return baseContent;
+  }
   const section = [
     "",
     "PDF语义检索片段（Embedding 相关段落）:",
-    embeddingContext,
+    normalizedContext,
   ].join("\n");
-
-  report?.(70, "合并 PDF 语义片段");
-  return appendCappedSection(source.content, section, MAX_SOURCE_CONTENT_CHARS);
+  return appendCappedSection(baseContent, section, MAX_SOURCE_CONTENT_CHARS);
 }
 
 async function tryBuildPDFEmbeddingContext(
@@ -532,7 +611,7 @@ async function tryBuildPDFEmbeddingContext(
   report?: ReviewProgressReporter,
 ) {
   try {
-    const mainWin = (Zotero.getMainWindows?.()[0] as any) || null;
+    const mainWin = getPrimaryMainWindowCompat() as any;
     const openAI = (mainWin as any)?.Meet?.OpenAI;
     const embedDocuments = openAI?.embedDocuments;
     const embedQuery = openAI?.embedQuery;
@@ -1114,16 +1193,15 @@ function getNoteText(item: Zotero.Item) {
 }
 
 async function getPDFAnnotationSource(
-  item: Zotero.Item,
+  attachments: Zotero.Item[],
   settings: ReviewSettings,
   report?: ReviewProgressReporter,
 ): Promise<{ text: string; label: string }> {
   try {
-    const attachments = await getCandidateAttachments(item);
     for (const attachment of attachments) {
       if (!isPDFAttachmentItem(attachment)) continue;
 
-      report?.(24, "读取 PDF 批注内容");
+      report?.(24, "读取 PDF 批注与批注笔记");
       const annotations = getAttachmentAnnotations(attachment);
       if (!annotations.length) continue;
 
@@ -1140,19 +1218,23 @@ async function getPDFAnnotationSource(
 
       const joined = lines.join("\n\n");
       const truncationEnabled = Boolean(settings.enablePDFInputTruncation);
+      if (!truncationEnabled) {
+        return {
+          text: joined,
+          label: buildAttachmentLabel(attachment),
+        };
+      }
       const annotationMaxChars = Math.max(
         1,
         Number(settings.pdfAnnotationTextMaxChars) ||
           MAX_PDF_ANNOTATION_TEXT_CHARS,
       );
       return {
-        text: truncationEnabled
-          ? truncateTextWithNotice(
-              joined,
-              annotationMaxChars,
-              `PDF批注内容已截断，超过 ${annotationMaxChars} 字符`,
-            )
-          : joined,
+        text: truncateTextWithNotice(
+          joined,
+          annotationMaxChars,
+          `PDF批注内容已截断，超过 ${annotationMaxChars} 字符`,
+        ),
         label: buildAttachmentLabel(attachment),
       };
     }
@@ -1164,11 +1246,10 @@ async function getPDFAnnotationSource(
 }
 
 async function getPDFTextSource(
-  item: Zotero.Item,
+  attachments: Zotero.Item[],
   settings: ReviewSettings,
   report?: ReviewProgressReporter,
 ) {
-  const attachments = await getCandidateAttachments(item);
   for (const attachment of attachments) {
     if (!isPDFAttachmentItem(attachment)) continue;
 
@@ -1181,16 +1262,20 @@ async function getPDFTextSource(
     const normalized = normalizeAttachmentText(text);
     if (!normalized) continue;
 
-    report?.(28, "提取 PDF 文本");
+    report?.(28, "提取 PDF 全文");
     const truncationEnabled = Boolean(settings.enablePDFInputTruncation);
+    if (!truncationEnabled) {
+      return {
+        text: normalized,
+        label: buildAttachmentLabel(attachment),
+      };
+    }
     const pdfTextMaxChars = Math.max(
       1,
       Number(settings.pdfTextMaxChars) || MAX_PDF_TEXT_CHARS,
     );
     return {
-      text: truncationEnabled
-        ? truncateText(normalized, pdfTextMaxChars)
-        : normalized,
+      text: truncateText(normalized, pdfTextMaxChars),
       label: buildAttachmentLabel(attachment),
     };
   }
@@ -1466,4 +1551,27 @@ async function withPromiseTimeout<T>(
       clearTimeout(timer);
     }
   }
+}
+
+function getPrimaryMainWindowCompat() {
+  const getMainWindows = (Zotero as any)?.getMainWindows;
+  if (typeof getMainWindows === "function") {
+    const wins = getMainWindows.call(Zotero);
+    if (Array.isArray(wins) && wins.length) return wins[0];
+  }
+  const getMainWindow = (Zotero as any)?.getMainWindow;
+  if (typeof getMainWindow === "function") {
+    return getMainWindow.call(Zotero) || null;
+  }
+
+  try {
+    const wm = (globalThis as any)?.Services?.wm;
+    if (wm?.getMostRecentWindow) {
+      return wm.getMostRecentWindow("zotero:main") || null;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }
