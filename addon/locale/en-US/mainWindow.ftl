@@ -1,0 +1,11 @@
+item-section-example1-head-text =
+    .label = Zotero-Exitem: Item Info
+item-section-example1-sidenav-tooltip =
+    .tooltiptext = This is Zotero-Exitem section (item info)
+item-section-example2-head-text =
+    .label = Zotero-Exitem: Reader [{$status}]
+item-section-example2-sidenav-tooltip =
+    .tooltiptext = This is Zotero-Exitem section (reader)
+item-section-example2-button-tooltip =
+    .tooltiptext = Unregister this section
+item-info-row-example-label = Example Row

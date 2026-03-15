@@ -1,0 +1,7 @@
+.tab .tab-icon.icon-item-type[data-item-type="exitem-review-manager-tab"] {
+  background: image-set(
+      url("chrome://exitem/content/icons/favicon@0.5x.png") 1x,
+      url("chrome://exitem/content/icons/favicon.png") 2x
+    )
+    no-repeat center / contain !important;
+}

@@ -1,0 +1,12 @@
+pref("modelConfigMode", "awesomegpt");
+pref("apiConfigMode", "zoterogpt");
+pref("provider", "openai");
+pref("timeoutSeconds", 600);
+pref("usePDFAsInputSource", true);
+pref("usePDFAnnotationsAsContext", true);
+pref("importPDFAnnotationsAsField", true);
+pref("enablePDFInputTruncation", false);
+pref("pdfTextMaxChars", 20000);
+pref("pdfAnnotationTextMaxChars", 12000);
+pref("customPromptTemplate", "");
+pref("customFolderSummaryPromptTemplate", "");

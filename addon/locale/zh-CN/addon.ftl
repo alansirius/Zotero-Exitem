@@ -1,0 +1,11 @@
+startup-begin = Zotero-Exitem 加载中
+startup-finish = Zotero-Exitem 已就绪
+menuitem-label = AI提炼文献内容
+menupopup-label = Zotero-Exitem
+menuitem-submenulabel = Zotero-Exitem
+menuitem-filemenulabel = Zotero-Exitem
+prefs-title = Zotero-Exitem
+prefs-table-title = 标题
+prefs-table-detail = 详情
+tabpanel-lib-tab-label = 文献综述
+tabpanel-reader-tab-label = 文献综述

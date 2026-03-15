@@ -1,0 +1,11 @@
+startup-begin = Zotero-Exitem is loading
+startup-finish = Zotero-Exitem is ready
+menuitem-label = AI Extract Literature Review
+menupopup-label = Zotero-Exitem
+menuitem-submenulabel = Zotero-Exitem
+menuitem-filemenulabel = Zotero-Exitem
+prefs-title = Zotero-Exitem
+prefs-table-title = Title
+prefs-table-detail = Detail
+tabpanel-lib-tab-label = Literature Review
+tabpanel-reader-tab-label = Literature Review

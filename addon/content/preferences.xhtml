@@ -1,0 +1,309 @@
+<linkset>
+  <html:link rel="localization" href="__addonRef__-preferences.ftl" />
+</linkset>
+<vbox
+  onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })"
+  flex="1"
+>
+  <groupbox flex="1">
+    <label><html:h2 data-l10n-id="pref-title"></html:h2></label>
+    <html:div style="margin: 4px 0 2px; color: #475569; line-height: 1.5">
+      Exitem 用于在 Zotero 中进行 AI 文献信息提炼、分类管理、合并综述与导出。
+    </html:div>
+
+    <html:div
+      style="
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 8px 0;
+        min-width: 720px;
+      "
+    >
+      <html:div
+        style="
+          border: 1px solid #d1d5db;
+          border-radius: 6px;
+          padding: 10px;
+          background: #f9fafb;
+        "
+      >
+        <html:div
+          style="
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+          "
+        >
+          <html:strong>兼容 GPT 插件检测</html:strong>
+          <html:button
+            type="button"
+            id="zotero-prefpane-__addonRef__-refresh-detection-btn"
+          >
+            刷新检测
+          </html:button>
+        </html:div>
+        <html:div
+          id="zotero-prefpane-__addonRef__-awesome-status"
+          style="margin-top: 6px; font-weight: 600"
+        >
+          检测中...
+        </html:div>
+        <html:div
+          id="zotero-prefpane-__addonRef__-awesome-detail"
+          style="
+            margin-top: 4px;
+            color: #4b5563;
+            font-size: 12px;
+            line-height: 1.4;
+          "
+        >
+        </html:div>
+      </html:div>
+
+      <html:fieldset
+        style="border: 1px solid #d1d5db; border-radius: 6px; padding: 10px"
+      >
+        <html:legend>提炼输入与导入选项</html:legend>
+        <html:div
+          style="
+            display: grid;
+            grid-template-columns: 160px 1fr;
+            gap: 8px;
+            align-items: start;
+            margin-top: 4px;
+          "
+        >
+          <html:label for="zotero-prefpane-__addonRef__-use-pdf-as-input-source"
+            >将条目 PDF 作为输入源</html:label
+          >
+          <html:div>
+            <html:input
+              id="zotero-prefpane-__addonRef__-use-pdf-as-input-source"
+              type="checkbox"
+            />
+            <html:span style="margin-left: 6px; color: #334155"
+              >启用后读取 PDF 全文参与提炼（可配截断上限）</html:span
+            >
+          </html:div>
+
+          <html:label
+            for="zotero-prefpane-__addonRef__-use-pdf-annotations-as-context"
+            >将 PDF 批注及笔记作为 AI 提炼上下文</html:label
+          >
+          <html:div>
+            <html:input
+              id="zotero-prefpane-__addonRef__-use-pdf-annotations-as-context"
+              type="checkbox"
+            />
+            <html:span style="margin-left: 6px; color: #334155"
+              >启用后将批注摘录/批注内容/批注下笔记加入模型输入</html:span
+            >
+          </html:div>
+
+          <html:label
+            for="zotero-prefpane-__addonRef__-import-pdf-annotations-as-field"
+            >将 PDF 批注及笔记导入独立字段</html:label
+          >
+          <html:div>
+            <html:input
+              id="zotero-prefpane-__addonRef__-import-pdf-annotations-as-field"
+              type="checkbox"
+            />
+            <html:span style="margin-left: 6px; color: #334155"
+              >启用后保存到文献记录字段（用于预览、导出、合并综述）</html:span
+            >
+          </html:div>
+
+          <html:label
+            for="zotero-prefpane-__addonRef__-enable-pdf-input-truncation"
+            >启用 PDF 输入截断保护</html:label
+          >
+          <html:div>
+            <html:input
+              id="zotero-prefpane-__addonRef__-enable-pdf-input-truncation"
+              type="checkbox"
+            />
+            <html:span style="margin-left: 6px; color: #334155"
+              >开启后按下方上限截断 PDF 原文与 PDF
+              批注文本；关闭后将尽量传入完整文本</html:span
+            >
+            <html:div
+              id="zotero-prefpane-__addonRef__-pdf-truncation-config"
+              style="
+                margin-top: 8px;
+                display: grid;
+                grid-template-columns: 170px 1fr;
+                gap: 8px;
+                align-items: center;
+              "
+            >
+              <html:label for="zotero-prefpane-__addonRef__-pdf-text-max-chars"
+                >PDF 原文截断上限（字符）</html:label
+              >
+              <html:input
+                id="zotero-prefpane-__addonRef__-pdf-text-max-chars"
+                type="number"
+                min="1"
+                max="1000000"
+                step="100"
+              />
+
+              <html:label
+                for="zotero-prefpane-__addonRef__-pdf-annotation-text-max-chars"
+                >PDF 批注截断上限（字符）</html:label
+              >
+              <html:input
+                id="zotero-prefpane-__addonRef__-pdf-annotation-text-max-chars"
+                type="number"
+                min="1"
+                max="1000000"
+                step="100"
+              />
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:fieldset>
+
+      <html:fieldset
+        style="border: 1px solid #d1d5db; border-radius: 6px; padding: 10px"
+      >
+        <html:legend>提炼 Prompt</html:legend>
+        <html:div
+          style="
+            display: grid;
+            grid-template-columns: 160px 1fr;
+            gap: 8px;
+            align-items: start;
+            margin-top: 4px;
+          "
+        >
+          <html:label for="zotero-prefpane-__addonRef__-custom-prompt"
+            >自定义 Prompt（可选）</html:label
+          >
+          <html:div style="display: flex; flex-direction: column; gap: 6px">
+            <html:textarea
+              id="zotero-prefpane-__addonRef__-custom-prompt"
+              rows="8"
+              style="width: 100%; resize: vertical; box-sizing: border-box"
+              placeholder="留空使用默认 Prompt。可使用 {{sourceContent}} 占位符插入文献信息。"
+            />
+            <html:div style="font-size: 12px; color: #475569; line-height: 1.4">
+              留空时使用默认模板；如果不写
+              <html:code>{{sourceContent}}</html:code
+              >，插件会自动把文献信息追加到末尾。
+            </html:div>
+          </html:div>
+
+          <html:label for="zotero-prefpane-__addonRef__-default-prompt"
+            >默认 Prompt</html:label
+          >
+          <html:textarea
+            id="zotero-prefpane-__addonRef__-default-prompt"
+            rows="8"
+            readonly="true"
+            style="
+              width: 100%;
+              resize: vertical;
+              box-sizing: border-box;
+              background: #f8fafc;
+              color: #334155;
+            "
+          />
+        </html:div>
+      </html:fieldset>
+
+      <html:fieldset
+        style="border: 1px solid #d1d5db; border-radius: 6px; padding: 10px"
+      >
+        <html:legend>合并综述 Prompt</html:legend>
+        <html:div
+          style="
+            display: grid;
+            grid-template-columns: 160px 1fr;
+            gap: 8px;
+            align-items: start;
+            margin-top: 4px;
+          "
+        >
+          <html:label
+            for="zotero-prefpane-__addonRef__-custom-folder-summary-prompt"
+            >自定义综述 Prompt（可选）</html:label
+          >
+          <html:div style="display: flex; flex-direction: column; gap: 6px">
+            <html:textarea
+              id="zotero-prefpane-__addonRef__-custom-folder-summary-prompt"
+              rows="8"
+              style="width: 100%; resize: vertical; box-sizing: border-box"
+              placeholder="留空使用默认 Prompt。可使用 {{folderName}} 与 {{recordsContent}} 占位符。"
+            />
+            <html:div style="font-size: 12px; color: #475569; line-height: 1.4">
+              留空时使用默认模板；如果不写
+              <html:code>{{folderName}}</html:code> 或
+              <html:code>{{recordsContent}}</html:code>，插件会自动补充。
+            </html:div>
+          </html:div>
+
+          <html:label
+            for="zotero-prefpane-__addonRef__-default-folder-summary-prompt"
+            >默认综述 Prompt</html:label
+          >
+          <html:textarea
+            id="zotero-prefpane-__addonRef__-default-folder-summary-prompt"
+            rows="8"
+            readonly="true"
+            style="
+              width: 100%;
+              resize: vertical;
+              box-sizing: border-box;
+              background: #f8fafc;
+              color: #334155;
+            "
+          />
+        </html:div>
+      </html:fieldset>
+
+      <html:div style="display: flex; justify-content: flex-end; gap: 8px">
+        <html:button
+          type="button"
+          id="zotero-prefpane-__addonRef__-refresh-prompt-view-btn"
+        >
+          保存 Prompt 配置
+        </html:button>
+      </html:div>
+
+      <html:div
+        style="
+          border: 1px dashed #cbd5e1;
+          border-radius: 6px;
+          padding: 10px;
+          color: #334155;
+          line-height: 1.5;
+        "
+      >
+        <html:div><html:strong>使用说明</html:strong></html:div>
+        <html:ul style="margin: 6px 0 0 18px">
+          <html:li
+            >在 Zotero 条目列表中选中文献，右键点击“AI提炼文献内容”。</html:li
+          >
+          <html:li>单次最多提炼 5 篇。</html:li>
+          <html:li>提炼结果可保存到“文献综述”标签页中进行分类和导出。</html:li>
+        </html:ul>
+      </html:div>
+
+      <html:div style="display: flex; justify-content: flex-end">
+        <html:button type="button" id="zotero-prefpane-__addonRef__-save-btn"
+          >保存配置</html:button
+        >
+      </html:div>
+    </html:div>
+  </groupbox>
+
+  <vbox>
+    <html:label
+      data-l10n-id="pref-help"
+      data-l10n-args='{"time": "__buildTime__","name": "__addonName__","version":"__buildVersion__"}'
+    ></html:label>
+  </vbox>
+</vbox>
